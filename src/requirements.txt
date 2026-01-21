@@ -4,3 +4,4 @@ PyQt6
 scikit_learn
 scipy
 spectral
+pyinstaller>=6.0

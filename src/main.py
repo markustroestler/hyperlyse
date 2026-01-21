@@ -1,4 +1,5 @@
 import sys
+import os
 import hyperlyse as hyper
 from PyQt6.QtWidgets import QApplication
 
@@ -6,7 +7,12 @@ from PyQt6.QtWidgets import QApplication
 
 # config
 __version__ = "1.3.3"
-config = hyper.Config(__version__, 'config.json')
+# Handle path for both development and PyInstaller bundled exe
+if hasattr(sys, '_MEIPASS'):
+    config_path = os.path.join(sys._MEIPASS, 'config.json')
+else:
+    config_path = 'config.json'
+config = hyper.Config(__version__, config_path)
 
 # main
 if __name__ == "__main__":
