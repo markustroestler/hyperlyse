@@ -1,0 +1,66 @@
+Abstract
+Our interdisciplinary approach to manuscript research aims to advance the understanding of Humanist Italian Renaissance book production by combining pigment analysis with art historical inquiry. It focuses on exploring how the use of specific pigments can aid in localizing and dating manuscripts, as well as shedding light on the manufacturing processes.
+
+The study centers on two of Vienna’s most significant Humanist book collections: those of Johannes Fabri and Johannes Sambucus kept at the Austrian National Library. These include manuscripts acquired in Italy as well as from earlier notable collections like that of other scholars and the 15th c. library of King Matthias Corvinus (UNESCO Memory of the world). He established the most important Humanist library and created an Italian-style workshop in Buda with Italian-trained artists.
+
+Understanding manuscripts relies to a great extent on knowing the material history of the object, including its date of production. If this is not stated in the book, scholars rely on contextual information, such as illumination or script. This basic heritage science research, therefore, proposes - for the first time - additionally a large-scale implementation of non-invasive material analysis.
+
+This comprises the development of advanced equipment and new machine learning-based evaluation. These advancements will enable the study of a greater number of manuscripts in less time, providing substantial benefits to future research projects in the field
+
+RQ
+Humanist book culture brought about a shift in the relationship between patrons and book-makers. Collectors north of the Alps obtained hand-made books from dealers or friends who travelled to Italy, especially Florence, which had become the centre of humanist book production in the 15th century [1]. 
+
+A common feature of all manuscripts was the use of a new type of script and decorations inspired by antiquity. The dissemination of this new “Renaissance” style commenced in Florence and rapidly propagated to other Italian cities. Consequently, script and book decoration became a distinguishing feature of European humanist education [2]. This is much studied from the perspective of their collectors, scribes and the reception of ancient authors. At the same time, the question of the places of origin, workshops, artists, and dating of manuscripts, now kept in libraries around the world, is difficult to ascertain. This project seeks to address this by combining a revision of existing art historical data with material analyses and investigating three key points:
+
+• Which pigments were commonly used in Italian Renaissance book production?
+• Can the use of specific pigments be linked to specific regions?
+• Can specific workshops or artists be identified through the use of specific pigments?
+The project focuses on two extraordinary collections with 70 relevant manuscripts today kept mainly by the Austrian National Library: the library of the former Viennese bishop Johannes Fabri (1478–1541) and that of the Humanist polymath Johannes Sambucus (1531–1584). Sambucus acquired his manuscripts during his studies and travels in Northern Italy before settling in Vienna. Fabri's collection includes Italian books acquired from prominent Viennese humanists such as Johannes Alexander Brassicanus and Johannes Cuspinian [3]; a significant number once belonged to one of the most renowned Humanist libraries of the time, assembled by King Matthias Corvinus (1443–1490, UNESCO Memory of the world).
+
+[Fig. 1] ÖNB Cod. 656, from the library of Matthias Corvinus
+
+Both collections offer a broad foundation for an extensive study of pigment use in Italian Renaissance book production. The manuscripts predominantly originate from Florence and other significant centres such as Rome and Naples as well as from north of the Alps, providing a diverse geographic scope.
+
+Furthermore, a comprehensive analysis of the illuminations within these collections offers a unique opportunity to investigate one of the most fascinating aspects: the division of labour within the manuscript workshop in Buda, where Italian illuminators created Italian-style manuscripts in a northern European environment. Prior investigations have shown they used local parchment for the manuscripts, but no information is available on their use of pigments. To include all examples of this workshop, additional measurements will be performed at the Hungarian National Library in Budapest.
+
+To address these questions, three well-established non-invasive methods for material characterisation in illuminated manuscripts will be used: XRF (X-Ray Fluorescence), ER-FTIR (External Reflection Fourier Transform Infrared Spectroscopy) and HSI (HyperSpectral Imaging) [4-6]. The methods enable the identification of pigments, whereby ER-FTIR additionally provides information on binders or specific degradation products. 
+
+[Fig. 2] ER-FTIR measurement in the library of Kremsmünster
+
+The evaluation of the XRF data provides a table with the elements present at the analysed point, whereas the evaluation of ER-FTIR and HSI data is more complex and time-consuming and involves a comparison to reference databases. However, most available databases only contain reference spectra of pure substances. In mixtures often used in book illuminations, these are often not well recognized, especially when they are only present in low concentrations. In the submitted project, we therefore want to focus on improving the evaluation of HSI data, where a high number of spectra (< 250.000) is stored together with the image data in so-called data cubes. 
+
+In the recent project Digital Transformation of the Austrian Humanities the open-source software Hyperlyse for the evaluation of HSI data cubes was developed, which addresses the specific requirements for manuscript research. The current version enables the creation of spectral databases that include reference materials as well as pigments in already investigated manuscripts in order to determine possible similarities. Data volumes of this size and analytical information of such complexity demand the use of improved evaluation tools. Our project is to train an AI model using machine learning based on existing XRF, FTIR and HSI data from previous projects [FWF grant P29892 and P23133] as well as newly created mockups [7] in order to achieve better search results using pattern recognition. Similar approaches have been successfully implemented in other fields [8]. Furthermore, we want to create the possibility that a selected spectrum can be compared with all spectra in a series of selected HSI data cubes [9]. Since the evaluation of the measurement data is much more time-consuming than the data acquisition, we expect significant time savings from innovative data evaluation.
+
+Additionally, we will develop a new mounting system for the ER-FTIR instrument that offers more flexibility when measuring valuable and delicate manuscripts on-site that cannot be fully opened.
+
+Innovation and expected outcomes
+
+• Innovative open source software for the evaluation of spectral data with integrated machine learning
+• Time savings through faster data evaluation
+• New flexible setup for ER-FTIR measurements in libraries
+• Open access XRF, ER-FTIR and HSI reference data for pigment use in Renaissance manuscripts
+• Localization and dating of understudied manuscripts in OA journals for further references 
+• Increased understanding of labour division in book production
+
+Methodology
+Methodology
+
+The project involves art historical analyses on the basis of the 1932 manuscript catalogue by Hermann, which is to be revised [10]. Relevant manuscripts will be studied in the original, and further stylistic analyses will be carried out with digital copies from major libraries. The stylistic grouping according to region and workshop will support the evaluation of the pigment analyses, which in turn provides information on previously unanswered questions about dates and places of origin.
+
+A spectrometer Type ELIO (XGLab) will be used for the XRF single-point measurements. The individual measurement points have to be carefully selected, as materials from the back side would also be detected due to the relatively deep penetration of the X-rays. 
+
+The ER-FTIR measurements will be performed by using a spectrometer Alpha (Bruker Optics) equipped with a module for external reflection. The mounting system available only allows measurements of manuscripts in a horizontal position. It is planned to construct a system that allows measurements in an inclined position.
+
+The HSI camera SpecimIQ collects hyperspectral images with 512 pixels x 512 pixels. The detectable spectral range is between 400 nm and 700 nm. It is planned to improve and extend the evaluation software Hyperlyse 1.3.3 as described in Section B, chapter 5. The improvements relate to an improved identification and characterization of pigments and the ability to compare manuscripts.
+
+Workplan
+
+Successful material analysis relies on close and continuous collaboration between scholars and scientists to define measurement points and develop an effective research program. As an initial step, a student researcher will gather basic information on the codicology and illumination of all manuscripts. This data will then be evaluated in the groups P1 and P2.
+
+During the project’s preliminary phase, a new mounting system for ER-FTIR and an analytical AI-driven data evaluation software for HSI will be developed to enhance research efficiency.
+
+Following a well-established protocol by P3, in the next step, HSI images are taken of up to four relevant pages in each manuscript. These HSI images provide basic insights into the colour distribution and guide the selection of measurement points for more time-intensive analytical techniques, such as XRF and ER-FTIR. Input from P2 will further refine the selection process.
+
+Each one-week measurement campaign will be followed by several weeks of data analysis and interdisciplinary discussions to evaluate findings and plan the next phase. This iterative approach ensures continuous optimization of the research methodology. A total of ten campaigns are planned over the course of the project. One campaign will be conducted at the Hungarian National Library, while nine campaigns will focus on manuscripts from the Austrian National Library.
+
+[Fig. 3] Iterative and collaborative work plan
