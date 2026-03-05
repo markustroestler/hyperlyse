@@ -165,6 +165,42 @@ class Spectrum:
 
 
 
+# NOTE (Phase 2 — caching/PCA): When called from compare_spectra, y2 may
+# already be resampled to y1's grid, so the input is per-comparison, not per-spectrum.
+# Cache or project (PCA) BEFORE resampling to avoid zero hit rates / inconsistent bases.
+def spectrum_to_vector(x, y, custom_range=None, use_gradient=False):
+    """
+    Prepares a spectrum (or spectral cube) for comparison by applying
+    wavelength range masking and optional gradient computation.
+
+    :param x: 1D wavelength array
+    :param y: intensity array - 1D (bands,) or 3D cube (rows, cols, bands)
+    :param custom_range: (x_min, x_max) wavelength range to keep
+    :param use_gradient: if True, return gradient instead of raw values
+    :return: processed spectrum/cube with masking and optional gradient applied
+    """
+    print('spectrum_to_vector: applying custom range and gradient (if selected)')
+
+    x = np.array(x)
+    y = np.array(y)
+    is_cube = len(y.shape) == 3
+
+    if custom_range is not None:
+        mask = np.logical_and(x >= custom_range[0], x <= custom_range[1])
+        if is_cube:
+            y = y[:, :, mask]
+        else:
+            y = y[mask]
+
+    if use_gradient:
+        if is_cube:
+            y = np.gradient(y, axis=2)
+        else:
+            y = np.gradient(y)
+
+    return y
+
+
 class Database:
 
     def __init__(self, root=''):
@@ -192,6 +228,77 @@ class Database:
 
     @staticmethod
     def compare_spectra(x1, y1,
+                        x2, y2,
+                        custom_range=None,
+                        use_gradient=False,
+                        squared_errs=True):
+        """
+        compares 2 spectra
+        :param x1: np.array, wavelength array of spectrum 1
+        :param y1: np.array, intensity array of spectrum 1 - can be 1d (simple spectrum) or 3d (cube)
+        :param x2: np.array, wavelength array of spectrum 2
+        :param y2: np.array, intensity array of spectrum 2 - must be 1d, is re-sampled if required
+        :param custom_range: (x_min, x_max), a custom range of wavelengths used for comparison
+        :param use_gradient: compare gradients instead of absolute differences
+        :param squared_errs: use squared differences (or absolute differences)
+        :return: mean error/distance; scalar or 2d np.array, depending on shape of y1
+        """
+        x1 = np.array(x1)
+        x2 = np.array(x2)
+        y1 = np.array(y1)
+        y2 = np.array(y2)
+
+        is_cube = len(y1.shape) == 3
+
+        # Compute effective overlapping wavelength range
+        lambda_min = max(x1[0], x2[0])
+        lambda_max = min(x1[-1], x2[-1])
+        if custom_range is not None:
+            lambda_min = max(lambda_min, custom_range[0])
+            lambda_max = min(lambda_max, custom_range[1])
+
+        # Check for sufficient overlap
+        mask1 = np.logical_and(x1 >= lambda_min, x1 <= lambda_max)
+        mask2 = np.logical_and(x2 >= lambda_min, x2 <= lambda_max)
+
+        if is_cube:
+            y1_masked_size = y1[:, :, mask1].size
+        else:
+            y1_masked_size = y1[mask1].size
+        y2_masked_size = y2[mask2].size
+
+        if y1_masked_size < 2 > y2_masked_size:
+            print('WARNING: compared spectra do not have sufficient overlap. Returning None')
+            return None
+
+        # Resample y2 to match y1's wavelength grid if they differ
+        if not np.array_equal(x1[mask1], x2[mask2]):
+            y2 = resample(y2[mask2], mask1.sum())
+            x2 = x1[mask1]
+
+        # Prepare comparison vectors
+        # INVARIANT: effective_range must match the (lambda_min, lambda_max) used
+        # for mask1/mask2 above. spectrum_to_vector will recompute a mask from this
+        # range — for v1 it replicates mask1 exactly, and for v2 (after resample)
+        # it is an identity no-op since x2 already equals x1[mask1].
+        effective_range = (lambda_min, lambda_max)
+        v1 = spectrum_to_vector(x1, y1, effective_range, use_gradient)
+        v2 = spectrum_to_vector(x2, y2, effective_range, use_gradient)
+
+        errs = v1 - v2
+
+        if squared_errs:
+            errs = np.power(errs, 2)
+        else:
+            errs = np.abs(errs)
+
+        if is_cube:
+            return np.mean(errs, axis=2)
+        else:
+            return np.mean(errs)
+
+    @staticmethod
+    def compare_spectra_old(x1, y1,
                         x2, y2,
                         custom_range=None,
                         use_gradient=False,
@@ -253,7 +360,7 @@ class Database:
             return np.mean(errs, axis=2)
         else:
             return np.mean(errs)
-
+    
     def search_spectrum(self,
                         x_query,
                         y_query,
