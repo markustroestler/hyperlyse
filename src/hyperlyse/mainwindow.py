@@ -39,6 +39,7 @@ class MainWindow(QMainWindow):
         self.drag_start_y = 0
         self.drag_start_hs_v = 0
         self.drag_start_vs_v = 0
+        self.rotation_quadrants = 0
 
         self.db = hyper.Database(config.default_db_path)
 
@@ -64,6 +65,21 @@ class MainWindow(QMainWindow):
 
         layout_img = QVBoxLayout()
         layout_outer.addLayout(layout_img)
+
+        layout_img_rotate = QHBoxLayout()
+        layout_img.addLayout(layout_img_rotate)
+
+        self.btn_rotate_left = QPushButton('Rotate Left\n90°')
+        self.btn_rotate_left.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum))
+        self.btn_rotate_left.pressed.connect(self.handle_rotate_left_image)
+        layout_img_rotate.addWidget(self.btn_rotate_left)
+
+        self.btn_rotate_right = QPushButton('Rotate Right\n90°')
+        self.btn_rotate_right.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum))
+        self.btn_rotate_right.pressed.connect(self.handle_rotate_right_image)
+        layout_img_rotate.addWidget(self.btn_rotate_right)
+
+        layout_img_rotate.addStretch()
 
         self.lbl_img = QLabel(cw)
         self.lbl_img.mousePressEvent = self.handle_click_on_image
@@ -408,6 +424,7 @@ class MainWindow(QMainWindow):
     def reset_ui(self):
         self.point_selection = None
         self.rect_selection = None
+        self.rotation_quadrants = 0
         self.spectrum_y = None
         self.error_map = None
         self.error_map_recompute_flag = True
@@ -498,6 +515,9 @@ class MainWindow(QMainWindow):
 
             # draw cross
             img = self.draw_marker(img)
+
+            # rotate for display
+            img = self.rotate_for_display(img)
 
             width = img.shape[1]
             height = img.shape[0]
@@ -626,7 +646,7 @@ class MainWindow(QMainWindow):
     def handle_release_on_image(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             if self.cube is not None:
-                rect = self.m2i(self.rubberband_selector.geometry())
+                rect = self.display_to_data_rect(self.rubberband_selector.geometry())
                 if rect.width() > 1 and rect.height() > 1:
                     cube_slice = self.cube.data[rect.y():rect.y()+rect.height(),
                                                 rect.x():rect.x()+rect.width(),
@@ -635,7 +655,7 @@ class MainWindow(QMainWindow):
                     self.rect_selection = rect
                     self.point_selection = None
                 else:
-                    pos_img = self.m2i(event.pos())
+                    pos_img = self.display_to_data_point(event.pos())
                     if 0 <= pos_img.x() < self.cube.ncols and 0 <= pos_img.y() < self.cube.nrows:
                         print(f"Selected point: ({pos_img.x()}, {pos_img.y()})")
                         self.spectrum_y = self.cube.data[pos_img.y(), pos_img.x(), :]
@@ -648,6 +668,14 @@ class MainWindow(QMainWindow):
                 self.rubberband_selector.hide()
         else:
             event.ignore()
+
+    def handle_rotate_left_image(self):
+        self.rotation_quadrants = (self.rotation_quadrants - 1) % 4
+        self.update_image_label()
+
+    def handle_rotate_right_image(self):
+        self.rotation_quadrants = (self.rotation_quadrants + 1) % 4
+        self.update_image_label()
 
     def handle_click_on_image_scroll(self, event):
         self.drag_start_x = event.pos().x()
@@ -755,6 +783,55 @@ class MainWindow(QMainWindow):
     ###########
     # helpers
     ##########
+    def rotate_for_display(self, img):
+        if self.rotation_quadrants == 0:
+            return img
+        if self.rotation_quadrants == 1:
+            return np.rot90(img, -1)
+        if self.rotation_quadrants == 2:
+            return np.rot90(img, 2)
+        return np.rot90(img, 1)
+
+    def display_to_data_point(self, point):
+        if self.cube is None:
+            return self.m2i(point)
+
+        x_disp = self.m2i(point.x())
+        y_disp = self.m2i(point.y())
+
+        width = self.cube.ncols
+        height = self.cube.nrows
+
+        if self.rotation_quadrants in (0, 2):
+            disp_width = width
+            disp_height = height
+        else:
+            disp_width = height
+            disp_height = width
+
+        x_disp = int(np.clip(x_disp, 0, max(disp_width - 1, 0)))
+        y_disp = int(np.clip(y_disp, 0, max(disp_height - 1, 0)))
+
+        if self.rotation_quadrants == 0:
+            x_data = x_disp
+            y_data = y_disp
+        elif self.rotation_quadrants == 1:
+            x_data = y_disp
+            y_data = height - 1 - x_disp
+        elif self.rotation_quadrants == 2:
+            x_data = width - 1 - x_disp
+            y_data = height - 1 - y_disp
+        else:
+            x_data = width - 1 - y_disp
+            y_data = x_disp
+
+        return QPoint(x_data, y_data)
+
+    def display_to_data_rect(self, rect):
+        p1 = self.display_to_data_point(rect.topLeft())
+        p2 = self.display_to_data_point(rect.bottomRight())
+        return QRect(p1, p2).normalized()
+
     def m2i(self, object):
         # convert mouse coordinates on scaled image label to image coordinates
         if isinstance(object, numbers.Number):
