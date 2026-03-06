@@ -30,17 +30,23 @@ class PlotCanvas(FigureCanvas):
              y,
              label='',
              linewidth=2,
-             hold=False):
+             hold=False,
+             color=None,
+             defer_draw=False):
         if not hold:
             self.figure.clear()
             self.ax = self.figure.add_subplot(111)
-            color = 'green' if self.xmin < self.xmax else 'red'
-            self.ax.axvspan(self.xmin, self.xmax, alpha=0.1, color=color)
-        self.ax.plot(x, y, label=label, linewidth=linewidth)
+            range_color = 'green' if self.xmin < self.xmax else 'red'
+            self.ax.axvspan(self.xmin, self.xmax, alpha=0.1, color=range_color)
+        kwargs = dict(label=label, linewidth=linewidth)
+        if color is not None:
+            kwargs['color'] = color
+        self.ax.plot(x, y, **kwargs)
         self.ax.set_ylim(self.ymin, self.ymax)
         if label:
             self.ax.legend()
-        self.draw()
+        if not defer_draw:
+            self.draw()
 
     def reset(self):
         self.figure.clear()
