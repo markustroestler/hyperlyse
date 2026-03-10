@@ -2,15 +2,91 @@ import os
 import numpy as np
 import numbers
 from PyQt6.QtGui import QPixmap, QImage, QGuiApplication
-from PyQt6.QtCore import Qt, QUrl, QRect, QPoint, QSize
+from PyQt6.QtCore import Qt, QUrl, QRect, QPoint, QSize, QThread, pyqtSignal
 from PyQt6.QtWidgets import QMainWindow, QFileDialog, QMessageBox, QRubberBand, QDoubleSpinBox, QRadioButton
 from PyQt6.QtWidgets import QWidget, QLabel, QCheckBox, QSlider, QPushButton, QComboBox, QSpinBox, QFrame, QLineEdit
 from PyQt6.QtWidgets import QHBoxLayout, QVBoxLayout, QGridLayout, QTabWidget, QScrollArea, QSizePolicy, QDialog
+from PyQt6.QtWidgets import QProgressDialog
 from matplotlib import pyplot as plt
 import hyperlyse as hyper
+from hyperlyse import cube_analyzer
 
 hyper_quotes = ['"Hyper, hyper. We need the bass drum." - H.P. Baxxter',
                 '"Travelling through hyper space ain\'t like dusting crops, boy!" - Han Solo']
+
+
+class CubeAnalysisWorker(QThread):
+    """Background worker for analyzing cubes."""
+    progress = pyqtSignal(int, int, str, float, bool)  # current, total, name, avg_time, skipped
+    finished = pyqtSignal(int, int)  # analyzed_count, skipped_count
+    error = pyqtSignal(str)
+
+    def __init__(self, cube_folder, sample_rate, include_subfolders):
+        super().__init__()
+        self.cube_folder = cube_folder
+        self.sample_rate = sample_rate
+        self.include_subfolders = include_subfolders
+        self._analyzed = 0
+        self._skipped = 0
+
+    def run(self):
+        try:
+            def on_progress(i, total, name, avg_time, skipped=False):
+                if skipped:
+                    self._skipped += 1
+                else:
+                    self._analyzed += 1
+                self.progress.emit(i + 1, total, name, avg_time, skipped)
+
+            cube_analyzer.analyze_cubes(
+                self.cube_folder,
+                sample_rate=self.sample_rate,
+                include_subfolders=self.include_subfolders,
+                progress_callback=on_progress)
+            self.finished.emit(self._analyzed, self._skipped)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class CubeSearchWorker(QThread):
+    """Background worker for cross-cube spectrum search."""
+    progress = pyqtSignal(int, int, str, float)  # current, total, cube_name, avg_time
+    finished = pyqtSignal(list)  # results
+    error = pyqtSignal(str)
+
+    def __init__(self, cube_folder, x_query, y_query, sample_rate,
+                 include_subfolders, custom_range, use_gradient,
+                 squared_errs, num_hits):
+        super().__init__()
+        self.cube_folder = cube_folder
+        self.x_query = x_query
+        self.y_query = y_query
+        self.sample_rate = sample_rate
+        self.include_subfolders = include_subfolders
+        self.custom_range = custom_range
+        self.use_gradient = use_gradient
+        self.squared_errs = squared_errs
+        self.num_hits = num_hits
+
+    def run(self):
+        try:
+            def on_progress(current, total, cube_name, avg_time):
+                self.progress.emit(current, total, cube_name, avg_time)
+
+            results = cube_analyzer.search_in_cached_cubes(
+                self.cube_folder,
+                self.x_query,
+                self.y_query,
+                sample_rate=self.sample_rate,
+                include_subfolders=self.include_subfolders,
+                custom_range=self.custom_range,
+                use_gradient=self.use_gradient,
+                squared_errs=self.squared_errs,
+                num_hits=self.num_hits,
+                progress_callback=on_progress)
+            self.finished.emit(results)
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 
@@ -43,6 +119,23 @@ class MainWindow(QMainWindow):
 
         self.db = hyper.Database(config.default_db_path)
 
+        # Phase 3: cube search results and hit color cycle
+        # Colors as (R,G,B) 0-255 for markers AND as hex strings for matplotlib
+        self.hit_colors_rgb = [
+            [230, 25, 75],    # red
+            [60, 180, 75],    # green
+            [0, 130, 200],    # blue
+            [245, 130, 48],   # orange
+            [145, 30, 180],   # purple
+            [240, 50, 230],   # magenta
+            [70, 240, 240],   # cyan
+            [210, 245, 60],   # lime
+            [250, 190, 212],  # pink
+            [128, 0, 0],      # maroon
+        ]
+        self.hit_colors_hex = ['#%02x%02x%02x' % tuple(c) for c in self.hit_colors_rgb]
+        self.cube_search_results = []  # list of hit dicts from cube_analyzer.search_in_cached_cubes
+        self._search_worker = None  # CubeSearchWorker instance when search is running
 
         self.last_source_name = ''
         self.last_export_dir = ''
@@ -80,6 +173,14 @@ class MainWindow(QMainWindow):
         layout_img_rotate.addWidget(self.btn_rotate_right)
 
         layout_img_rotate.addStretch()
+
+        # Cube results tabs (above the image)
+        self.tabs_cube_results = QTabWidget(cw)
+        self.tabs_cube_results.currentChanged.connect(self.handle_cube_result_tab_changed)
+        self.tabs_cube_results.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum))
+        self.tabs_cube_results.setMaximumHeight(30)
+        self.tabs_cube_results.hide()  # hidden until there are cube hits
+        layout_img.addWidget(self.tabs_cube_results)
 
         self.lbl_img = QLabel(cw)
         self.lbl_img.mousePressEvent = self.handle_click_on_image
@@ -271,20 +372,10 @@ class MainWindow(QMainWindow):
         layout_spectra_ctrl = QGridLayout()
         layout_spectra.addLayout(layout_spectra_ctrl)
 
-        layout_spectra_ctrl.addWidget(QLabel('Database'), 0, 0)
-        self.le_db_path = QLineEdit(self.config.default_db_path)
-        self.le_db_path.setEnabled(False)
-        layout_spectra_ctrl.addWidget(self.le_db_path, 0, 1)
-        self.btn_change_db = QPushButton('change..')
-        self.btn_change_db.pressed.connect(self.handle_action_set_db_dir)
-        layout_spectra_ctrl.addWidget(self.btn_change_db, 0, 2)
-
-
-
         # comparison / x-range control
-        layout_spectra_ctrl.addWidget(QLabel('Comparison'), 1, 0)
+        layout_spectra_ctrl.addWidget(QLabel('Comparison'), 0, 0)
         layout_compare_ctrl = QHBoxLayout()
-        layout_spectra_ctrl.addLayout(layout_compare_ctrl, 1, 1)
+        layout_spectra_ctrl.addLayout(layout_compare_ctrl, 0, 1)
 
         self.rs_xrange = hyper.QRangeSlider(cw)
         self.rs_xrange.setRange(0, 1000)
@@ -316,12 +407,12 @@ class MainWindow(QMainWindow):
         # comparison spectra source
         lbl_source = QLabel('Source')
         lbl_source.setAlignment(Qt.AlignmentFlag.AlignTop)
-        layout_spectra_ctrl.addWidget(lbl_source, 2, 0)
+        layout_spectra_ctrl.addWidget(lbl_source, 1, 0)
 
         self.tabs_spectra_source = QTabWidget(cw)
         self.tabs_spectra_source.currentChanged.connect(self.update_spectrum_plot)
         self.tabs_spectra_source.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum))
-        layout_spectra_ctrl.addWidget(self.tabs_spectra_source, 2, 1)
+        layout_spectra_ctrl.addWidget(self.tabs_spectra_source, 1, 1)
 
         # select spectrum -> index 0
         self.tab_select = QWidget()
@@ -374,14 +465,49 @@ class MainWindow(QMainWindow):
         action_load_data = menu_file.addAction('&Load Hyperspectral Image...')
         action_load_data.triggered.connect(self.handle_action_load_data)
 
-        action_load_data = menu_file.addAction('&Set database...')
-        action_load_data.triggered.connect(self.handle_action_set_db_dir)
-
         action_save_img = menu_file.addAction('&Save current image...')
         action_save_img.triggered.connect(self.handle_action_export_image)
 
         action_export_spectrum = menu_file.addAction('&Save selected spectrum...')
         action_export_spectrum.triggered.connect(self.handle_action_export_spectrum)
+
+        # settings menu
+        menu_settings = menubar.addMenu('S&ettings')
+
+        action_preferences = menu_settings.addAction('&Preferences...')
+        action_preferences.triggered.connect(self.handle_action_open_preferences)
+
+        menu_settings.addSeparator()
+
+        # number of hits submenu (duplicated in Preferences dialog)
+        menu_num_hits = menu_settings.addMenu('Number of hits')
+        self.num_hits_actions = []
+        for n in [1, 2, 3, 5, 10]:
+            action = menu_num_hits.addAction(str(n))
+            action.setCheckable(True)
+            action.setChecked(n == self.config.num_hits)
+            action.triggered.connect(lambda checked, num=n: self.handle_set_num_hits(num))
+            self.num_hits_actions.append(action)
+
+        # search toggles (duplicated in Preferences dialog)
+        self.action_search_in_db = menu_settings.addAction('Search in reference database')
+        self.action_search_in_db.setCheckable(True)
+        self.action_search_in_db.setChecked(self.config.search_in_db)
+        self.action_search_in_db.toggled.connect(self.handle_toggle_search_in_db)
+
+        self.action_search_in_cubes = menu_settings.addAction('Search in analyzed cubes')
+        self.action_search_in_cubes.setCheckable(True)
+        self.action_search_in_cubes.setChecked(self.config.search_in_cubes)
+        self.action_search_in_cubes.toggled.connect(self.handle_toggle_search_in_cubes)
+
+        menu_settings.addSeparator()
+
+        self.action_analyze_cubes = menu_settings.addAction('&Analyze cubes now')
+        self.action_analyze_cubes.triggered.connect(self.handle_action_analyze_cubes)
+        self.action_analyze_cubes.setEnabled(bool(self.config.cube_folder_path))
+
+        action_reset_cache = menu_settings.addAction('Reset cube cache...')
+        action_reset_cache.triggered.connect(self.handle_action_reset_cube_cache)
 
         # info menu
         menu_info = menubar.addMenu('&?')
@@ -429,6 +555,8 @@ class MainWindow(QMainWindow):
         self.error_map = None
         self.error_map_recompute_flag = True
         self.pca_recompute_flag = True
+        self.cube_search_results = []
+        self._update_cube_result_tabs()
         self.tabs_img_ctrl.setCurrentIndex(0)
         self.sl_lambda.setValue(0)
         self.lbl_lambda.setText(self.get_lambda_slider_text(0))
@@ -448,6 +576,11 @@ class MainWindow(QMainWindow):
         self.pca_recompute_flag = True
 
     def update_image_label(self):
+        # Check if we're viewing a cube hit tab (not the Source tab)
+        if self._is_viewing_hit_tab():
+            self._display_cube_hit_image()
+            return
+
         img = None
         # I. get base image, depending on selected tab
         # 0 - RGB image
@@ -554,6 +687,9 @@ class MainWindow(QMainWindow):
             # database spectra
             # 0 - select
             if self.tabs_spectra_source.currentIndex() == 0:
+                # Clear cube results when in Select mode
+                self.cube_search_results = []
+                self._update_cube_result_tabs()
                 if self.db is not None:
                     if self.cmb_comparison_ref.currentData() >= 0:
                         reference = self.db.spectra[self.cmb_comparison_ref.currentData()]
@@ -571,18 +707,32 @@ class MainWindow(QMainWindow):
                                        hold=True)
             # 1 - search
             elif self.tabs_spectra_source.currentIndex() == 1:
-                if self.sb_nspectra.value() > 0:
+                hit_index = 0  # global color index across all results
+
+                # Search in JDX database
+                if self.config.search_in_db and self.sb_nspectra.value() > 0:
                     results = self.db.search_spectrum(self.cube.bands,
                                                       self.spectrum_y,
                                                       custom_range=(self.rs_xrange.start(), self.rs_xrange.end()),
                                                       use_gradient=self.cb_gradient.isChecked(),
                                                       squared_errs=self.cb_squared.isChecked())
                     for result in results[:self.sb_nspectra.value()]:
+                        color = self.hit_colors_hex[hit_index % len(self.hit_colors_hex)]
                         self.plot.plot(result['spectrum'].x,
                                        result['spectrum'].y,
                                        label=f"{result['spectrum'].display_string()} (mean err={result['error']:10.3E})",
                                        linewidth=1,
-                                       hold=True)
+                                       hold=True,
+                                       color=color)
+                        hit_index += 1
+
+                # Search in analyzed cubes (background worker with progress)
+                if self.config.search_in_cubes and self.config.cube_folder_path:
+                    self._search_hit_index_offset = hit_index
+                    self._start_cube_search()
+                else:
+                    self.cube_search_results = []
+                    self._update_cube_result_tabs()
 
 
     ##################
@@ -629,7 +779,16 @@ class MainWindow(QMainWindow):
     #############################
     # image & spectra operations
     #############################
+    def _is_viewing_hit_tab(self):
+        """Return True if user is viewing a cube hit tab (not Source)."""
+        return (self.tabs_cube_results.isVisible() and
+                self.tabs_cube_results.currentIndex() > 0 and
+                self.cube_search_results)
+
     def handle_click_on_image(self, event):
+        if self._is_viewing_hit_tab():
+            event.ignore()
+            return
         if event.buttons() == Qt.MouseButton.LeftButton and self.cube is not None:
             self.rubberband_origin = event.pos()
             self.rubberband_selector.setGeometry(QRect(self.rubberband_origin, QSize()))
@@ -637,6 +796,9 @@ class MainWindow(QMainWindow):
         else:
             event.ignore()
     def handle_move_on_image(self, event):
+        if self._is_viewing_hit_tab():
+            event.ignore()
+            return
         if event.buttons() == Qt.MouseButton.LeftButton and self.cube is not None:
             x = np.clip(event.pos().x(), 0, self.lbl_img.width()-1)
             y = np.clip(event.pos().y(), 0, self.lbl_img.height()-1)
@@ -644,6 +806,9 @@ class MainWindow(QMainWindow):
         else:
             event.ignore()
     def handle_release_on_image(self, event):
+        if self._is_viewing_hit_tab():
+            event.ignore()
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             if self.cube is not None:
                 rect = self.display_to_data_rect(self.rubberband_selector.geometry())
@@ -771,18 +936,361 @@ class MainWindow(QMainWindow):
                                                    image=img)
 
 
-    def handle_action_set_db_dir(self):
-        db_dir = QFileDialog.getExistingDirectory(self, "Select directory containing reference spectra in jcamp-dx format",
-                                                  self.db.root)
-        if db_dir:
-            self.db.refresh_from_disk(db_dir)
-            self.fill_db_spectra_combobox()
-            self.le_db_path.setText(self.db.root)
+    def handle_action_open_preferences(self):
+        dialog = hyper.SettingsDialog(self, self.config)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            data = dialog.get_data()
+
+            # Apply database path change
+            old_db_path = self.config.default_db_path
+            new_db_path = data['default_db_path']
+            if new_db_path and new_db_path != old_db_path:
+                self.config.default_db_path = new_db_path
+                self.db.refresh_from_disk(new_db_path)
+                self.fill_db_spectra_combobox()
+
+            # Apply cube folder change
+            old_cube_path = self.config.cube_folder_path
+            new_cube_path = data['cube_folder_path']
+            if new_cube_path != old_cube_path:
+                self.config.cube_folder_path = new_cube_path
+                self.action_analyze_cubes.setEnabled(bool(new_cube_path))
+                if new_cube_path:
+                    self.statusBar().showMessage(f'Cube folder set: {new_cube_path}')
+
+            # Apply sample rate
+            self.config.sample_rate = data['sample_rate']
+
+            # Apply num_hits and sync menu
+            self.config.num_hits = data['num_hits']
+            for action in self.num_hits_actions:
+                action.blockSignals(True)
+                action.setChecked(int(action.text()) == data['num_hits'])
+                action.blockSignals(False)
+
+            # Apply search toggles and sync menu
+            self.config.search_in_db = data['search_in_db']
+            self.action_search_in_db.blockSignals(True)
+            self.action_search_in_db.setChecked(data['search_in_db'])
+            self.action_search_in_db.blockSignals(False)
+
+            self.config.search_in_cubes = data['search_in_cubes']
+            self.action_search_in_cubes.blockSignals(True)
+            self.action_search_in_cubes.setChecked(data['search_in_cubes'])
+            self.action_search_in_cubes.blockSignals(False)
+
+            self.config.save()
+
+    def handle_set_num_hits(self, num):
+        self.config.num_hits = num
+        self.config.save()
+        for action in self.num_hits_actions:
+            action.setChecked(int(action.text()) == num)
+
+    def handle_toggle_search_in_db(self, checked):
+        self.config.search_in_db = checked
+        self.config.save()
+
+    def handle_toggle_search_in_cubes(self, checked):
+        self.config.search_in_cubes = checked
+        self.config.save()
+
+    def handle_action_analyze_cubes(self):
+        if not self.config.cube_folder_path:
+            QMessageBox.information(self, 'Analyze cubes', 'No cube folder is set.')
+            return
+
+        # Discover cubes first to know the total
+        cube_files = cube_analyzer.discover_cubes(
+            self.config.cube_folder_path, self.config.include_subfolders)
+        if not cube_files:
+            QMessageBox.information(self, 'Analyze cubes',
+                                   'No cube files found in the selected folder.')
+            return
+
+        # Create progress dialog
+        self._analysis_progress = QProgressDialog(
+            'Preparing analysis...', 'Cancel', 0, len(cube_files), self)
+        self._analysis_progress.setWindowTitle('Analyzing Cubes')
+        self._analysis_progress.setMinimumDuration(0)
+        self._analysis_progress.setAutoClose(False)
+        self._analysis_progress.setAutoReset(False)
+        self._analysis_progress.setWindowModality(Qt.WindowModality.WindowModal)
+
+        # Create and start worker
+        self._analysis_worker = CubeAnalysisWorker(
+            self.config.cube_folder_path,
+            self.config.sample_rate,
+            self.config.include_subfolders)
+        self._analysis_worker.progress.connect(self._on_analysis_progress)
+        self._analysis_worker.finished.connect(self._on_analysis_finished)
+        self._analysis_worker.error.connect(self._on_analysis_error)
+        self._analysis_progress.canceled.connect(self._analysis_worker.terminate)
+        self._analysis_worker.start()
+
+    def _on_analysis_progress(self, current, total, name, avg_time, skipped):
+        dlg = getattr(self, '_analysis_progress', None)
+        if dlg is not None:
+            dlg.setValue(current)
+            if skipped:
+                label = f'Cube {current}/{total}: {name} (cached, skipped)'
+            else:
+                label = f'Cube {current}/{total}: {name}'
+                if avg_time > 0 and current >= 2:
+                    remaining = avg_time * (total - current)
+                    if remaining >= 60:
+                        label += f' (~{remaining/60:.1f} min remaining)'
+                    else:
+                        label += f' (~{remaining:.0f}s remaining)'
+            dlg.setLabelText(label)
+        self.statusBar().showMessage(f'Analyzing cube {current}/{total}: {name}')
+
+    def _on_analysis_finished(self, analyzed, skipped):
+        if hasattr(self, '_analysis_progress') and self._analysis_progress is not None:
+            self._analysis_progress.close()
+            self._analysis_progress = None
+        self.statusBar().showMessage(
+            f'Cube analysis complete. {analyzed} analyzed, {skipped} skipped (cached).')
+        self._analysis_worker = None
+
+    def _on_analysis_error(self, message):
+        if hasattr(self, '_analysis_progress') and self._analysis_progress is not None:
+            self._analysis_progress.close()
+            self._analysis_progress = None
+        QMessageBox.critical(self, 'Analysis Error', f'An error occurred:\n{message}')
+        self._analysis_worker = None
+
+    ##############################
+    # Cross-cube search (async)
+    ##############################
+    def _start_cube_search(self):
+        """Launch background cross-cube search with a progress dialog."""
+        # Cancel any running search
+        if self._search_worker is not None:
+            self._search_worker.terminate()
+            self._search_worker.wait()
+            self._search_worker = None
+
+        self._search_progress = QProgressDialog(
+            'Searching cached cubes...', 'Cancel', 0, 0, self)
+        self._search_progress.setWindowTitle('Searching Cubes')
+        self._search_progress.setMinimumDuration(0)
+        self._search_progress.setAutoClose(False)
+        self._search_progress.setAutoReset(False)
+        self._search_progress.setWindowModality(Qt.WindowModality.WindowModal)
+
+        self._search_worker = CubeSearchWorker(
+            self.config.cube_folder_path,
+            self.cube.bands,
+            self.spectrum_y,
+            sample_rate=self.config.sample_rate,
+            include_subfolders=self.config.include_subfolders,
+            custom_range=(self.rs_xrange.start(), self.rs_xrange.end()),
+            use_gradient=self.cb_gradient.isChecked(),
+            squared_errs=self.cb_squared.isChecked(),
+            num_hits=self.config.num_hits)
+        self._search_worker.progress.connect(self._on_search_progress)
+        self._search_worker.finished.connect(self._on_search_finished)
+        self._search_worker.error.connect(self._on_search_error)
+        self._search_progress.canceled.connect(self._on_search_canceled)
+        self._search_worker.start()
+
+    def _on_search_progress(self, current, total, cube_name, avg_time):
+        dlg = getattr(self, '_search_progress', None)
+        if dlg is not None:
+            if total > 0:
+                dlg.setMaximum(total)
+                dlg.setValue(current)
+            label = f'Cube {current + 1}/{total}: {cube_name}'
+            if avg_time > 0 and current >= 2:
+                remaining = avg_time * (total - current)
+                if remaining >= 60:
+                    label += f' (~{remaining/60:.1f} min remaining)'
+                else:
+                    label += f' (~{remaining:.0f}s remaining)'
+            dlg.setLabelText(label)
+        self.statusBar().showMessage(f'Searching cube {current + 1}/{total}: {cube_name}')
+
+    def _on_search_finished(self, results):
+        dlg = getattr(self, '_search_progress', None)
+        if dlg is not None:
+            dlg.close()
+            self._search_progress = None
+
+        self.cube_search_results = results
+        hit_index = getattr(self, '_search_hit_index_offset', 0)
+
+        for i, hit in enumerate(self.cube_search_results):
+            color = self.hit_colors_hex[(hit_index + i) % len(self.hit_colors_hex)]
+            hit['_color_hex'] = color
+            hit['_color_rgb'] = self.hit_colors_rgb[(hit_index + i) % len(self.hit_colors_rgb)]
+            self.plot.plot(hit['spectrum_x'],
+                           hit['spectrum_y'],
+                           label=f"{hit['cube_name']} ({hit['x']},{hit['y']}) (mean err={hit['error']:10.3E})",
+                           linewidth=1,
+                           hold=True,
+                           color=color)
+
+        self._update_cube_result_tabs()
+        self._search_worker = None
+        n = len(self.cube_search_results)
+        self.statusBar().showMessage(f'Cube search complete. {n} hit{"s" if n != 1 else ""} found.')
+
+    def _on_search_error(self, message):
+        dlg = getattr(self, '_search_progress', None)
+        if dlg is not None:
+            dlg.close()
+            self._search_progress = None
+        self.cube_search_results = []
+        self._update_cube_result_tabs()
+        self._search_worker = None
+        self.statusBar().showMessage(f'Cube search error: {message}')
+
+    def _on_search_canceled(self):
+        if self._search_worker is not None:
+            self._search_worker.terminate()
+            self._search_worker.wait()
+            self._search_worker = None
+        dlg = getattr(self, '_search_progress', None)
+        if dlg is not None:
+            dlg.close()
+            self._search_progress = None
+        self.statusBar().showMessage('Cube search cancelled.')
+
+    def handle_action_reset_cube_cache(self):
+        if not self.config.cube_folder_path:
+            QMessageBox.information(self, 'Reset cube cache', 'No cube folder is set.')
+            return
+        reply = QMessageBox.question(self, 'Reset cube cache',
+                                     'This will delete all cached cube analysis data.\nAre you sure?',
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                     QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
+            cube_analyzer.reset_cache(self.config.cube_folder_path)
+            self.cube_search_results = []
+            self._update_cube_result_tabs()
+            self.statusBar().showMessage('Cube cache cleared.')
 
 
     ###########
     # helpers
     ##########
+
+    # --- Cube result tabs ---
+    def _update_cube_result_tabs(self):
+        """Rebuild cube result tabs from self.cube_search_results."""
+        self.tabs_cube_results.blockSignals(True)
+        self.tabs_cube_results.clear()
+
+        if not self.cube_search_results:
+            self.tabs_cube_results.hide()
+            self.tabs_cube_results.blockSignals(False)
+            return
+
+        # Group hits by cube_file
+        cube_groups = {}
+        for hit in self.cube_search_results:
+            key = hit['cube_file']
+            if key not in cube_groups:
+                cube_groups[key] = []
+            cube_groups[key].append(hit)
+
+        # Order groups by their best (lowest error) hit
+        ordered_groups = sorted(cube_groups.items(), key=lambda kv: kv[1][0]['error'])
+
+        # Add "Source" tab first
+        self.tabs_cube_results.addTab(QWidget(), 'Source')
+
+        # Add one tab per cube with hits
+        for cube_file, hits in ordered_groups:
+            cube_name = hits[0]['cube_name']
+            # Truncate long names
+            display_name = cube_name if len(cube_name) <= 20 else cube_name[:17] + '...'
+            tab = QWidget()
+            tab.setProperty('cube_file', cube_file)
+            tab.setProperty('hits', hits)
+            self.tabs_cube_results.addTab(tab, display_name)
+
+        self.tabs_cube_results.setCurrentIndex(0)
+        self.tabs_cube_results.show()
+        self.tabs_cube_results.blockSignals(False)
+
+    def handle_cube_result_tab_changed(self, index):
+        """When user clicks a cube result tab, update the image display."""
+        self.update_image_label()
+
+    def _display_cube_hit_image(self):
+        """Render the cube hit image for the currently selected hit tab."""
+        tab_index = self.tabs_cube_results.currentIndex()
+        if tab_index <= 0:
+            return
+
+        tab_widget = self.tabs_cube_results.widget(tab_index)
+        hits = tab_widget.property('hits')
+        if not hits:
+            return
+
+        # Load RGB preview from cache
+        cache_dir = hits[0]['cache_dir']
+        rgb = cube_analyzer.load_rgb_preview(cache_dir)
+        if rgb is None:
+            return
+
+        # Convert from uint8 [0,255] to float [0,1] for consistent processing
+        img = rgb.astype(np.float64) / 255.0
+
+        # Adjust brightness
+        img = img * self.sl_brightness.value() / 100
+        self.lbl_brightness.setText(f'{self.sl_brightness.value()}%')
+        img = np.clip(img, 0, 1)
+        img = np.uint8(img * 255)
+
+        # Draw crosshair markers for each hit in this cube
+        if len(img.shape) == 2:
+            img = np.dstack([img, img, img])
+        img_marker = img.copy()
+
+        scale = self.sl_zoom.value() / 100
+        if scale < 1:
+            padding = int(np.ceil(1 / scale - 1))
+            cross_size = int(np.ceil(self.config.cross_size / scale))
+        else:
+            padding = 0
+            cross_size = self.config.cross_size
+
+        nrows, ncols = img.shape[0], img.shape[1]
+
+        for hit in hits:
+            color = hit.get('_color_rgb', [255, 0, 0])
+            px, py = hit['x'], hit['y']
+
+            # Clamp to image bounds
+            px = min(max(px, 0), ncols - 1)
+            py = min(max(py, 0), nrows - 1)
+
+            # Horizontal line
+            img_marker[max(py - padding, 0):min(py + padding + 1, nrows),
+                       max(px - cross_size, 0):min(px + cross_size + 1, ncols)] = color
+            # Vertical line
+            img_marker[max(py - cross_size, 0):min(py + cross_size + 1, nrows),
+                       max(px - padding, 0):min(px + padding + 1, ncols)] = color
+
+        img = img * (1 - self.config.marker_alpha) + img_marker * self.config.marker_alpha
+        img = img.astype(np.uint8)
+
+        # Note: no rotation applied to hit cube images (rotation is for the source cube only)
+        width = img.shape[1]
+        height = img.shape[0]
+        qImg = QImage(img.tobytes(), width, height, 3 * width, QImage.Format.Format_RGB888)
+
+        if qImg is not None:
+            qPixmap = QPixmap.fromImage(qImg)
+            self.lbl_zoom.setText(f'{self.sl_zoom.value()}%')
+            zoom_scale = self.sl_zoom.value() / 100
+            qPixmap = qPixmap.scaled(int(width * zoom_scale), int(height * zoom_scale),
+                                     transformMode=Qt.TransformationMode.FastTransformation)
+            self.lbl_img.setPixmap(qPixmap)
+            self.lbl_img.resize(int(width * zoom_scale), int(height * zoom_scale))
     def rotate_for_display(self, img):
         if self.rotation_quadrants == 0:
             return img

@@ -81,10 +81,10 @@ class Cube:
             # use mean? or use all values? who knows?
             self.data = (data - dref_data) / (wref_data - dref_data)
 
-        except:
+        except Exception as e:
             #self.data = np.clip(data / scale_factor, 0, 1)
             self.data = data / scale_factor
-            print("WARNING: No reference spectra found, cube might be uncalibrated.")
+            print(f"WARNING: Calibration failed ({e}), cube might be uncalibrated.")
 
         if verbose:
             rgb = self.to_rgb()

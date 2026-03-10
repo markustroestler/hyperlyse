@@ -10,4 +10,5 @@ contract.txt
 **/samples/**
 **/doc/**
 **/db/**
+**/cubes/**
 **/.hyperlyse_cache/
