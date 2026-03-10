@@ -6,6 +6,9 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from hyperlyse.database import Database
+from hyperlyse.database import Metadata, Spectrum
+from hyperlyse.feature_extractor import FeatureExtractor
+from hyperlyse.vector_store import VectorStore
 
 
 def assert_equal(old, new, label):
@@ -501,3 +504,116 @@ class TestCombinatorial:
                                        use_gradient=use_gradient,
                                        squared_errs=squared_errs)
         assert_equal(old, new, f"combo cube diff grad={use_gradient} sq={squared_errs}")
+
+
+# ---------------------------------------------------------------------------
+# Cached search_spectrum tests — verify bit-identical to compare_spectra loop
+# ---------------------------------------------------------------------------
+
+class TestSearchSpectrumCaching:
+    """Verify cached search_spectrum matches calling compare_spectra individually."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self, tmp_path):
+        np.random.seed(99)
+        # Create a Database without hitting the filesystem
+        self.db = Database.__new__(Database)
+        self.db.root = ''
+        self.db._extractor = FeatureExtractor()
+        self.db._store = VectorStore(str(tmp_path / 'cache'))
+        # Build synthetic DB spectra with varied wavelength grids
+        self.db.spectra = []
+        for i in range(5):
+            x = np.linspace(400 + i * 5, 900 - i * 5, 200)
+            y = np.random.rand(200)
+            self.db.spectra.append(Spectrum(x, y, Metadata(f'test_{i}')))
+        self.x_query = np.linspace(420, 880, 180)
+        self.y_query = np.random.rand(180)
+
+    def test_cached_vs_uncached(self):
+        """search_spectrum results must match individual compare_spectra calls."""
+        results = self.db.search_spectrum(self.x_query, self.y_query)
+        for r in results:
+            expected = Database.compare_spectra(
+                self.x_query, self.y_query,
+                r['spectrum'].x, r['spectrum'].y)
+            np.testing.assert_allclose(r['error'], expected, rtol=0, atol=0)
+
+    def test_second_search_identical(self):
+        """Repeated search with same inputs must produce identical results."""
+        r1 = self.db.search_spectrum(self.x_query, self.y_query)
+        r2 = self.db.search_spectrum(self.x_query, self.y_query)
+        assert len(r1) == len(r2)
+        for a, b in zip(r1, r2):
+            np.testing.assert_allclose(a['error'], b['error'], rtol=0, atol=0)
+
+    def test_different_pixel_reuses_v2_cache(self):
+        """Changing y_query (different pixel) should not add new v2 cache entries."""
+        self.db.search_spectrum(self.x_query, self.y_query)
+        cache_size = len(self.db._store._memory)
+        assert cache_size > 0, "cache should have entries after first search"
+        y2 = np.random.rand(180)  # different pixel
+        self.db.search_spectrum(self.x_query, y2)
+        assert len(self.db._store._memory) == cache_size
+
+    def test_different_pixel_still_correct(self):
+        """Results with different y_query must still match compare_spectra."""
+        y2 = np.random.rand(180)
+        # Warm cache with first query
+        self.db.search_spectrum(self.x_query, self.y_query)
+        # Second query should use cached v2 but produce correct results
+        results = self.db.search_spectrum(self.x_query, y2)
+        for r in results:
+            expected = Database.compare_spectra(
+                self.x_query, y2,
+                r['spectrum'].x, r['spectrum'].y)
+            np.testing.assert_allclose(r['error'], expected, rtol=0, atol=0)
+
+    def test_disk_persistence(self, tmp_path):
+        """After clearing memory, vectors should load from disk."""
+        self.db.search_spectrum(self.x_query, self.y_query)
+        # Create new store pointing at same disk cache, empty memory
+        store2 = VectorStore(str(tmp_path / 'cache'))
+        self.db._store = store2
+        assert len(store2._memory) == 0
+        results = self.db.search_spectrum(self.x_query, self.y_query)
+        for r in results:
+            expected = Database.compare_spectra(
+                self.x_query, self.y_query,
+                r['spectrum'].x, r['spectrum'].y)
+            np.testing.assert_allclose(r['error'], expected, rtol=0, atol=0)
+
+    def test_all_flag_combinations(self):
+        """All (use_gradient, squared_errs, custom_range) combos must match."""
+        for grad in [False, True]:
+            for sq in [False, True]:
+                for cr in [None, (450, 850)]:
+                    results = self.db.search_spectrum(
+                        self.x_query, self.y_query,
+                        custom_range=cr, use_gradient=grad, squared_errs=sq)
+                    for r in results:
+                        expected = Database.compare_spectra(
+                            self.x_query, self.y_query,
+                            r['spectrum'].x, r['spectrum'].y,
+                            custom_range=cr, use_gradient=grad, squared_errs=sq)
+                        np.testing.assert_allclose(
+                            r['error'], expected, rtol=0, atol=0,
+                            err_msg=f"grad={grad} sq={sq} cr={cr}")
+
+    def test_same_grid_spectra(self):
+        """DB spectra with same grid as query (no resampling needed)."""
+        np.random.seed(200)
+        db = Database.__new__(Database)
+        db.root = ''
+        db._extractor = FeatureExtractor()
+        db._store = VectorStore()
+        db.spectra = []
+        x = np.linspace(420, 880, 180)
+        for i in range(3):
+            db.spectra.append(Spectrum(x, np.random.rand(180), Metadata(f's{i}')))
+        y_query = np.random.rand(180)
+        results = db.search_spectrum(x, y_query)
+        for r in results:
+            expected = Database.compare_spectra(x, y_query, r['spectrum'].x, r['spectrum'].y)
+            np.testing.assert_allclose(r['error'], expected, rtol=0, atol=0)
+
