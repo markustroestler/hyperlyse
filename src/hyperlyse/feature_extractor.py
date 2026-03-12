@@ -19,8 +19,6 @@ def spectrum_to_vector(x, y, custom_range=None, use_gradient=False):
     :param use_gradient: if True, return gradient instead of raw values
     :return: processed spectrum/cube with masking and optional gradient applied
     """
-    print('spectrum_to_vector: applying custom range and gradient (if selected)')
-
     x = np.array(x)
     y = np.array(y)
     is_cube = len(y.shape) == 3

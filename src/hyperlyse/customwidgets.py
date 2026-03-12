@@ -151,6 +151,14 @@ class SettingsDialog(QDialog):
         self.chk_search_cubes.setChecked(config.search_in_cubes)
         layout.addRow('', self.chk_search_cubes)
 
+        self.chk_use_pca = QCheckBox('Use fast approximate search (PCA + BallTree)')
+        self.chk_use_pca.setChecked(config.use_pca)
+        self.chk_use_pca.setToolTip(
+            'When enabled, uses PCA dimensionality reduction for faster k-NN search.\n'
+            'Builds PCA from extracted features on-the-fly for each cube.\n'
+            'Results should be similar to brute-force search.')
+        layout.addRow('', self.chk_use_pca)
+
         # Button box
         self.bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         self.bb.accepted.connect(self.accept)
@@ -179,4 +187,5 @@ class SettingsDialog(QDialog):
             'num_hits': self.cb_num_hits.currentData(),
             'search_in_db': self.chk_search_db.isChecked(),
             'search_in_cubes': self.chk_search_cubes.isChecked(),
+            'use_pca': self.chk_use_pca.isChecked(),
         }

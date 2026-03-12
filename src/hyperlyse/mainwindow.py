@@ -56,7 +56,7 @@ class CubeSearchWorker(QThread):
 
     def __init__(self, cube_folder, x_query, y_query, sample_rate,
                  include_subfolders, custom_range, use_gradient,
-                 squared_errs, num_hits):
+                 squared_errs, num_hits, use_pca=False):
         super().__init__()
         self.cube_folder = cube_folder
         self.x_query = x_query
@@ -67,6 +67,7 @@ class CubeSearchWorker(QThread):
         self.use_gradient = use_gradient
         self.squared_errs = squared_errs
         self.num_hits = num_hits
+        self.use_pca = use_pca
 
     def run(self):
         try:
@@ -83,6 +84,7 @@ class CubeSearchWorker(QThread):
                 use_gradient=self.use_gradient,
                 squared_errs=self.squared_errs,
                 num_hits=self.num_hits,
+                use_pca=self.use_pca,
                 progress_callback=on_progress)
             self.finished.emit(results)
         except Exception as e:
@@ -690,6 +692,7 @@ class MainWindow(QMainWindow):
                 # Clear cube results when in Select mode
                 self.cube_search_results = []
                 self._update_cube_result_tabs()
+                self.update_image_label()  # Refresh image display
                 if self.db is not None:
                     if self.cmb_comparison_ref.currentData() >= 0:
                         reference = self.db.spectra[self.cmb_comparison_ref.currentData()]
@@ -707,6 +710,10 @@ class MainWindow(QMainWindow):
                                        hold=True)
             # 1 - search
             elif self.tabs_spectra_source.currentIndex() == 1:
+                # Clear previous cube search results before starting new search
+                self.cube_search_results = []
+                self._update_cube_result_tabs()
+                self.update_image_label()  # Refresh image display to remove old crosshairs
                 hit_index = 0  # global color index across all results
 
                 # Search in JDX database
@@ -979,6 +986,8 @@ class MainWindow(QMainWindow):
             self.action_search_in_cubes.setChecked(data['search_in_cubes'])
             self.action_search_in_cubes.blockSignals(False)
 
+            self.config.use_pca = data.get('use_pca', False)
+
             self.config.save()
 
     def handle_set_num_hits(self, num):
@@ -1088,7 +1097,8 @@ class MainWindow(QMainWindow):
             custom_range=(self.rs_xrange.start(), self.rs_xrange.end()),
             use_gradient=self.cb_gradient.isChecked(),
             squared_errs=self.cb_squared.isChecked(),
-            num_hits=self.config.num_hits)
+            num_hits=self.config.num_hits,
+            use_pca=self.config.use_pca)
         self._search_worker.progress.connect(self._on_search_progress)
         self._search_worker.finished.connect(self._on_search_finished)
         self._search_worker.error.connect(self._on_search_error)

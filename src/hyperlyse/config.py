@@ -27,6 +27,7 @@ class Config:
         self.search_in_db = cfg.get('SEARCH_IN_DB', True)
         self.search_in_cubes = cfg.get('SEARCH_IN_CUBES', False)
         self.num_hits = cfg.get('NUM_HITS', 3)
+        self.use_pca = cfg.get('USE_PCA', False)
 
     def save(self):
         """Persist current settings back to config.json."""
@@ -39,6 +40,7 @@ class Config:
         cfg['SEARCH_IN_DB'] = self.search_in_db
         cfg['SEARCH_IN_CUBES'] = self.search_in_cubes
         cfg['NUM_HITS'] = self.num_hits
+        cfg['USE_PCA'] = self.use_pca
         with open(self._config_path, 'w') as f:
             json.dump(cfg, f, indent=2)
 

@@ -491,3 +491,166 @@ class TestSearchMultipleCubes:
         assert progress_calls[1][0] == 1
         # cube names should be non-empty strings
         assert all(len(call[2]) > 0 for call in progress_calls)
+
+
+# ---------------------------------------------------------------------------
+# Vectorized resampling tests
+# ---------------------------------------------------------------------------
+
+class TestSearchMismatchedGrids:
+
+    def test_search_with_different_wavelength_grids(self, tmp_path):
+        """When query and cube have different wavelength grids, the vectorized
+        resampling path should still find the planted target."""
+        np.random.seed(42)
+        bands_cube = np.linspace(400, 800, 20)
+        bands_query = np.linspace(420, 780, 15)
+        data = np.random.rand(4, 4, 20).astype(np.float64)
+        # Plant a distinctive target
+        target_in_cube = np.linspace(0.1, 0.9, 20)
+        data[1, 2, :] = target_in_cube
+        cube_file = str(tmp_path / 'mismatch.raw')
+        _create_mock_cube_with_data(cube_file, data, bands_cube)
+        analyze_cube(cube_file, str(tmp_path), sample_rate=1, cube_class=MockCube)
+
+        # Build a query on the different grid — resample the target
+        from scipy.signal import resample
+        overlap_mask = np.logical_and(bands_cube >= 420, bands_cube <= 780)
+        target_overlap = target_in_cube[overlap_mask]
+        target_resampled = resample(target_overlap, 15)
+
+        results = search_in_cached_cubes(
+            str(tmp_path), bands_query, target_resampled,
+            sample_rate=1, num_hits=1)
+        assert len(results) >= 1
+        assert results[0]['y'] == 1
+        assert results[0]['x'] == 2
+
+
+# ---------------------------------------------------------------------------
+# PCA artifact tests
+# ---------------------------------------------------------------------------
+
+class TestPCAArtifacts:
+
+    def test_pca_artifacts_produced(self, tmp_path):
+        """analyze_cube should produce PCA model and BallTree for fast search."""
+        cube_file = str(tmp_path / 'capture.raw')
+        _create_dummy_cube_file(cube_file)
+        cache_dir = analyze_cube(cube_file, str(tmp_path), sample_rate=1,
+                                 cube_class=MockCube)
+
+        assert os.path.isfile(os.path.join(cache_dir, 'pca_model.joblib'))
+        assert os.path.isfile(os.path.join(cache_dir, 'search_index.joblib'))
+
+    def test_pca_metadata_fields(self, tmp_path):
+        cube_file = str(tmp_path / 'capture.raw')
+        _create_dummy_cube_file(cube_file)
+        cache_dir = analyze_cube(cube_file, str(tmp_path), sample_rate=1,
+                                 cube_class=MockCube)
+
+        with open(os.path.join(cache_dir, 'metadata.json'), 'r') as f:
+            meta = json.load(f)
+        assert 'pca_components' in meta
+        assert 'pca_explained_variance_raw' in meta
+        assert 'pca_explained_variance_gradient' in meta
+        # MockCube has 10 bands, so max 10 components
+        assert meta['pca_components'] <= 10
+        assert 0 < meta['pca_explained_variance_raw'] <= 1.0
+        assert 0 < meta['pca_explained_variance_gradient'] <= 1.0
+
+    def test_pca_spectra_shape(self, tmp_path):
+        """Test that PCA model is properly trained on extracted features."""
+        cube_file = str(tmp_path / 'capture.raw')
+        _create_dummy_cube_file(cube_file)
+        cache_dir = analyze_cube(cube_file, str(tmp_path), sample_rate=1,
+                                 cube_class=MockCube)
+
+        # Load PCA model and verify it has the right number of components
+        import joblib
+        pca = joblib.load(os.path.join(cache_dir, 'pca_model.joblib'))
+        with open(os.path.join(cache_dir, 'metadata.json'), 'r') as f:
+            meta = json.load(f)
+        n_components = meta['pca_components']
+        assert pca.n_components_ == n_components
+        assert pca.explained_variance_ratio_.shape[0] == n_components
+
+
+# ---------------------------------------------------------------------------
+# PCA search tests
+# ---------------------------------------------------------------------------
+
+class TestPCASearch:
+
+    @pytest.fixture(autouse=True)
+    def setup(self, tmp_path):
+        self.tmp_path = tmp_path
+        np.random.seed(0)
+        self.bands = np.linspace(400, 800, 20)
+        data = np.random.rand(4, 4, 20).astype(np.float64)
+        self.target_spectrum = np.linspace(0.1, 0.9, 20)
+        data[1, 2, :] = self.target_spectrum
+        cube_file = str(tmp_path / 'test_cube.raw')
+        _create_mock_cube_with_data(cube_file, data, self.bands)
+        analyze_cube(cube_file, str(tmp_path), sample_rate=1, cube_class=MockCube)
+
+    def test_pca_search_finds_exact_match(self):
+        results = search_in_cached_cubes(
+            str(self.tmp_path), self.bands, self.target_spectrum,
+            sample_rate=1, num_hits=1, use_pca=True)
+        assert len(results) >= 1
+        best = results[0]
+        assert best['x'] == 2
+        assert best['y'] == 1
+
+    def test_pca_search_returns_requested_hits(self):
+        results = search_in_cached_cubes(
+            str(self.tmp_path), self.bands, self.target_spectrum,
+            sample_rate=1, num_hits=3, use_pca=True)
+        assert len(results) == 3
+
+    def test_pca_search_has_required_fields(self):
+        results = search_in_cached_cubes(
+            str(self.tmp_path), self.bands, self.target_spectrum,
+            sample_rate=1, num_hits=1, use_pca=True)
+        hit = results[0]
+        for field in ['error', 'cube_file', 'cube_name', 'x', 'y',
+                       'spectrum_y', 'spectrum_x', 'cache_dir',
+                       'nrows', 'ncols']:
+            assert field in hit, f"Missing field: {field}"
+
+    def test_pca_and_bruteforce_agree_on_exact_match(self):
+        """Both modes should find the same planted target as top-1."""
+        bf = search_in_cached_cubes(
+            str(self.tmp_path), self.bands, self.target_spectrum,
+            sample_rate=1, num_hits=1, use_pca=False)
+        pca = search_in_cached_cubes(
+            str(self.tmp_path), self.bands, self.target_spectrum,
+            sample_rate=1, num_hits=1, use_pca=True)
+        assert bf[0]['x'] == pca[0]['x']
+        assert bf[0]['y'] == pca[0]['y']
+
+    def test_pca_fallback_when_no_pca_files(self, tmp_path):
+        """If PCA artifacts are missing, use_pca=True falls back to brute-force."""
+        bands = np.linspace(400, 800, 10)
+        data = np.random.rand(4, 4, 10).astype(np.float64)
+        target = np.ones(10) * 0.5
+        data[2, 2, :] = target
+        cube_file = str(tmp_path / 'nopca.raw')
+        _create_mock_cube_with_data(cube_file, data, bands)
+        analyze_cube(cube_file, str(tmp_path), sample_rate=1, cube_class=MockCube)
+
+        # Delete PCA files to simulate an old cache
+        cache_dir = _cache_dir_for_cube(str(tmp_path), cube_file)
+        for f in ['pca_model.joblib', 'spectra_pca.npy', 'search_index.joblib']:
+            path = os.path.join(cache_dir, f)
+            if os.path.isfile(path):
+                os.remove(path)
+
+        # Search should still work via brute-force fallback
+        results = search_in_cached_cubes(
+            str(tmp_path), bands, target,
+            sample_rate=1, num_hits=1, use_pca=True)
+        assert len(results) >= 1
+        assert results[0]['x'] == 2
+        assert results[0]['y'] == 2
