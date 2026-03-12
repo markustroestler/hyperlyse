@@ -161,12 +161,12 @@ class CubeLoadingDialog(QDialog):
         # Setup timer for elapsed time display
         self.timer = QTimer()
         self.timer.timeout.connect(self._update_elapsed_time)
-        self.start_time = QTime()
+        self.start_time = None
 
     def showEvent(self, event):
         """Start the timer when dialog is shown."""
         super().showEvent(event)
-        self.start_time.start()
+        self.start_time = QTime.currentTime()
         self.timer.start(100)  # Update every 100ms
 
     def closeEvent(self, event):
@@ -176,9 +176,10 @@ class CubeLoadingDialog(QDialog):
 
     def _update_elapsed_time(self):
         """Update the elapsed time display."""
-        elapsed_ms = self.start_time.elapsed()
-        elapsed_s = elapsed_ms / 1000.0
-        self.elapsed_label.setText(f"Elapsed: {elapsed_s:.1f}s")
+        if self.start_time is not None:
+            elapsed_ms = self.start_time.msecsTo(QTime.currentTime())
+            elapsed_s = elapsed_ms / 1000.0
+            self.elapsed_label.setText(f"Elapsed: {elapsed_s:.1f}s")
 
     def on_cancel_clicked(self):
         """Emit cancel signal when cancel button is clicked."""
