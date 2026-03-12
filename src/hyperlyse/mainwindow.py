@@ -2,7 +2,7 @@ import os
 import numpy as np
 import numbers
 from PyQt6.QtGui import QPixmap, QImage, QGuiApplication
-from PyQt6.QtCore import Qt, QUrl, QRect, QPoint, QSize, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QUrl, QRect, QPoint, QSize, QThread, pyqtSignal, QTimer, QTime
 from PyQt6.QtWidgets import QMainWindow, QFileDialog, QMessageBox, QRubberBand, QDoubleSpinBox, QRadioButton
 from PyQt6.QtWidgets import QWidget, QLabel, QCheckBox, QSlider, QPushButton, QComboBox, QSpinBox, QFrame, QLineEdit
 from PyQt6.QtWidgets import QHBoxLayout, QVBoxLayout, QGridLayout, QTabWidget, QScrollArea, QSizePolicy, QDialog
@@ -137,13 +137,17 @@ class CubeLoadingDialog(QDialog):
         self.setWindowTitle("Loading Cube Data")
         self.setModal(True)
         self.setMinimumWidth(400)
-        self.setMaximumHeight(150)
+        self.setMaximumHeight(180)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowCloseButtonHint)
 
         layout = QVBoxLayout()
 
         self.status_label = QLabel("Loading cube metadata...")
         layout.addWidget(self.status_label)
+
+        # Elapsed time label
+        self.elapsed_label = QLabel("Elapsed: 0s")
+        layout.addWidget(self.elapsed_label)
 
         button_layout = QHBoxLayout()
         self.cancel_button = QPushButton("Cancel")
@@ -153,6 +157,28 @@ class CubeLoadingDialog(QDialog):
         layout.addLayout(button_layout)
 
         self.setLayout(layout)
+
+        # Setup timer for elapsed time display
+        self.timer = QTimer()
+        self.timer.timeout.connect(self._update_elapsed_time)
+        self.start_time = QTime()
+
+    def showEvent(self, event):
+        """Start the timer when dialog is shown."""
+        super().showEvent(event)
+        self.start_time.start()
+        self.timer.start(100)  # Update every 100ms
+
+    def closeEvent(self, event):
+        """Stop the timer when dialog is closed."""
+        self.timer.stop()
+        super().closeEvent(event)
+
+    def _update_elapsed_time(self):
+        """Update the elapsed time display."""
+        elapsed_ms = self.start_time.elapsed()
+        elapsed_s = elapsed_ms / 1000.0
+        self.elapsed_label.setText(f"Elapsed: {elapsed_s:.1f}s")
 
     def on_cancel_clicked(self):
         """Emit cancel signal when cancel button is clicked."""
