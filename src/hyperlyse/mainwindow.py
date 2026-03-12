@@ -91,6 +91,84 @@ class CubeSearchWorker(QThread):
             self.error.emit(str(e))
 
 
+class CubeLoadingWorker(QThread):
+    """Background worker for loading cube data."""
+    progress = pyqtSignal(str)  # status message
+    finished = pyqtSignal(object)  # loaded cube object
+    error = pyqtSignal(str)  # error message
+
+    def __init__(self, filename):
+        super().__init__()
+        self.filename = filename
+        self._cancelled = False
+
+    def run(self):
+        try:
+            self.progress.emit("Loading cube metadata...")
+            cube = hyper.Cube(self.filename)
+
+            if self._cancelled:
+                self.error.emit("Loading cancelled by user")
+                return
+
+            self.progress.emit("Generating RGB preview...")
+            rgb = cube.to_rgb()
+
+            if self._cancelled:
+                self.error.emit("Loading cancelled by user")
+                return
+
+            # Emit cube object with the RGB already computed
+            self.finished.emit(cube)
+        except Exception as e:
+            self.error.emit(str(e))
+
+    def cancel(self):
+        """Cancel the loading operation."""
+        self._cancelled = True
+
+
+class CubeLoadingDialog(QDialog):
+    """Modal dialog showing loading progress with cancel button."""
+    cancel_requested = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Loading Cube Data")
+        self.setModal(True)
+        self.setMinimumWidth(400)
+        self.setMaximumHeight(150)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowCloseButtonHint)
+
+        layout = QVBoxLayout()
+
+        self.status_label = QLabel("Loading cube metadata...")
+        layout.addWidget(self.status_label)
+
+        button_layout = QHBoxLayout()
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.clicked.connect(self.on_cancel_clicked)
+        button_layout.addStretch()
+        button_layout.addWidget(self.cancel_button)
+        layout.addLayout(button_layout)
+
+        self.setLayout(layout)
+
+    def on_cancel_clicked(self):
+        """Emit cancel signal when cancel button is clicked."""
+        self.cancel_requested.emit()
+        self.reject()
+
+    def update_status(self, message):
+        """Update the status message."""
+        self.status_label.setText(message)
+
+    def set_error(self, message):
+        """Show error message and change button to Close."""
+        self.status_label.setText(f"Error: {message}")
+        self.cancel_button.setText("Close")
+        self.cancel_button.clicked.disconnect()
+        self.cancel_button.clicked.connect(self.reject)
 
 
 
@@ -746,21 +824,45 @@ class MainWindow(QMainWindow):
     # loading HS data
     ##################
     def load_data(self, filename):
+        """Load cube data in a background thread with progress dialog."""
+        self.loading_worker = CubeLoadingWorker(filename)
+        self.loading_dialog = CubeLoadingDialog(self)
+
+        # Connect worker signals
+        self.loading_worker.progress.connect(self.loading_dialog.update_status)
+        self.loading_worker.finished.connect(self._on_cube_loaded)
+        self.loading_worker.error.connect(self._on_cube_load_error)
+        self.loading_dialog.cancel_requested.connect(self.loading_worker.cancel)
+
+        # Start loading in background thread
+        self.loading_worker.start()
+
+        # Show modal dialog
+        self.loading_dialog.exec()
+
+    def _on_cube_loaded(self, cube):
+        """Handle successful cube loading."""
         try:
-            self.cube = hyper.Cube(filename)
+            self.cube = cube
             self.rgb = self.cube.to_rgb()
             self.pca = None
             self.reset_ui()
             self.update_image_label()
-            self.rawfile = filename
-            self.statusBar().showMessage(f'Loaded: {os.path.basename(filename)} | '
-                                         f'{self.cube.ncols} x {self.cube.nrows} px | '
-                                         f'{self.cube.nbands} bands.')
+            self.rawfile = self.loading_worker.filename
+            self.statusBar().showMessage(f'Loaded: {os.path.basename(self.rawfile)} | '
+                                        f'{self.cube.ncols} x {self.cube.nrows} px | '
+                                        f'{self.cube.nbands} bands.')
             self.sl_zoom.setValue(int(self.width() * self.config.initial_image_width_ratio / self.cube.ncols * 100))
-
+            self.loading_dialog.accept()
         except Exception as e:
-            print("Error loading file: ")
-            print(e)
+            self._on_cube_load_error(str(e))
+
+    def _on_cube_load_error(self, error_message):
+        """Handle cube loading error."""
+        print("Error loading file: ")
+        print(error_message)
+        self.loading_dialog.set_error(error_message)
+
 
     def handle_action_load_data(self):
         filename, _ = QFileDialog.getOpenFileName(None, "Select ENVI data file", "")
