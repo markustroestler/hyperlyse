@@ -916,7 +916,7 @@ class MainWindow(QMainWindow):
                     dir_default = self.db.root
                 else:
                     dir_default = '.'
-                filename_default = f"{self.dataset_name()}_{self.selection_str()}_{spectrum.metadata.id}.jdx"
+                filename_default = f"{spectrum.metadata.source_object}_{spectrum.metadata.id}_{self.selection_str()}.jdx"
                 file_spectrum, _ = QFileDialog.getSaveFileName(None, "Save spectrum", os.path.join(dir_default, filename_default),
                                                                "JCAMP-DX (*.jdx *.dx *jcm);;Plain x,y pairs (*.dpt *.csv *.txt )")
                 if file_spectrum:
