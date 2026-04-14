@@ -67,7 +67,7 @@ for building with pyinstaller on Windows, cd to /hyperlyse/src/ and run build.ba
 
 ## Changelog
 
-### v1.3.3
+### v1.4.0
 
 - Data loading: if a "scale factor" is found in ENVI .hdr file, the values of the data cube are scaled accordingly.
   No other transformations/scalings are applied.

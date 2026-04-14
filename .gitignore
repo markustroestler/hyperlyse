@@ -10,3 +10,6 @@ contract.txt
 **/samples/**
 **/doc/**
 **/db/**
+**/internal_docs/**
+**/cubes/**
+**/vectors/**
