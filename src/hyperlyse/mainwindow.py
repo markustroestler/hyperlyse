@@ -135,6 +135,8 @@ class MainWindow(QMainWindow):
         self.rubberband_selector.setGeometry(QRect(0, 0, 0, 0))
         self.scroll_img = QScrollArea(cw)
         self.scroll_img.setWidget(self.lbl_img)
+        self.scroll_img.setWidgetResizable(True)
+        self.lbl_img.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.scroll_img.mousePressEvent = self.handle_click_on_image_scroll
         self.scroll_img.mouseMoveEvent = self.handle_move_on_image_scroll
         self.scroll_img.wheelEvent = self.handle_wheel_on_image_scroll
@@ -580,7 +582,9 @@ class MainWindow(QMainWindow):
                                          transformMode=Qt.TransformationMode.FastTransformation)
                 # set image
                 self.lbl_img.setPixmap(qPixmap)
-                self.lbl_img.resize(int(width * scale), int(height * scale))
+                scaled_width = int(width * scale)
+                scaled_height = int(height * scale)
+                self.lbl_img.resize(scaled_width, scaled_height)
 
     def update_spectrum_plot(self):
 
@@ -857,20 +861,46 @@ class MainWindow(QMainWindow):
         else:
             event.ignore()
     def handle_wheel_on_image_scroll(self, event):
-        if self.scroll_img.horizontalScrollBar().maximum() > 0:
-            hs_r = self.scroll_img.horizontalScrollBar().value() / self.scroll_img.horizontalScrollBar().maximum()
-        else:
-            hs_r = 0.5
-        if self.scroll_img.verticalScrollBar().maximum() > 0:
-            vs_r = self.scroll_img.verticalScrollBar().value() / self.scroll_img.verticalScrollBar().maximum()
-        else:
-            vs_r = 0.5
+        # Calculate new zoom level
         s = event.angleDelta().y() * self.config.scroll_speed
         if s < 0:
             s = -1 / s
-        self.sl_zoom.setValue(int(self.sl_zoom.value() * s))
-        self.scroll_img.horizontalScrollBar().setValue(int(self.scroll_img.verticalScrollBar().maximum() * hs_r))
-        self.scroll_img.verticalScrollBar().setValue(int(self.scroll_img.verticalScrollBar().maximum() * vs_r))
+        new_zoom_percent = int(self.sl_zoom.value() * s)
+
+        # Clamp to valid zoom range
+        new_zoom_percent = max(self.sl_zoom.minimum(), min(self.sl_zoom.maximum(), new_zoom_percent))
+
+        # If zoom didn't change, don't process further
+        if new_zoom_percent == self.sl_zoom.value():
+            return
+
+        # Get cursor position in viewport coordinates
+        cursor_viewport_pos = event.position()
+        cursor_vp_x = cursor_viewport_pos.x()
+        cursor_vp_y = cursor_viewport_pos.y()
+
+        # Get current scroll position and zoom
+        h_scrollbar = self.scroll_img.horizontalScrollBar()
+        v_scrollbar = self.scroll_img.verticalScrollBar()
+        old_zoom = self.sl_zoom.value() / 100
+        h_pos = h_scrollbar.value()
+        v_pos = v_scrollbar.value()
+
+        # Calculate cursor position in image coordinates (accounting for current zoom/scroll)
+        cursor_img_x = (h_pos + cursor_vp_x) / old_zoom
+        cursor_img_y = (v_pos + cursor_vp_y) / old_zoom
+
+        # Apply zoom (triggers image resize via update_image_label)
+        new_zoom = new_zoom_percent / 100
+        self.sl_zoom.setValue(new_zoom_percent)
+
+        # Calculate where cursor should be in new zoomed viewport coordinates
+        new_cursor_viewport_x = cursor_img_x * new_zoom - cursor_vp_x
+        new_cursor_viewport_y = cursor_img_y * new_zoom - cursor_vp_y
+
+        # Apply scroll with bounds checking and rounding
+        h_scrollbar.setValue(max(0, min(h_scrollbar.maximum(), round(new_cursor_viewport_x))))
+        v_scrollbar.setValue(max(0, min(v_scrollbar.maximum(), round(new_cursor_viewport_y))))
 
     def handle_action_export_image(self):
         expdir = os.path.dirname(self.rawfile)
