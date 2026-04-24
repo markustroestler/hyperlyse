@@ -1008,8 +1008,9 @@ class MainWindow(QMainWindow):
         if self.cube is None:
             return self.m2i(point)
 
-        x_disp = self.m2i(point.x())
-        y_disp = self.m2i(point.y())
+        point_on_pixmap = self.label_to_pixmap_point(point)
+        x_disp = self.m2i(point_on_pixmap.x())
+        y_disp = self.m2i(point_on_pixmap.y())
 
         width = self.cube.ncols
         height = self.cube.nrows
@@ -1043,6 +1044,15 @@ class MainWindow(QMainWindow):
         p1 = self.display_to_data_point(rect.topLeft())
         p2 = self.display_to_data_point(rect.bottomRight())
         return QRect(p1, p2).normalized()
+
+    def label_to_pixmap_point(self, point):
+        pixmap = self.lbl_img.pixmap()
+        if pixmap is None:
+            return point
+
+        x_offset = max((self.lbl_img.width() - pixmap.width()) // 2, 0)
+        y_offset = max((self.lbl_img.height() - pixmap.height()) // 2, 0)
+        return QPoint(point.x() - x_offset, point.y() - y_offset)
 
     def data_to_display_point(self, point):
         if self.cube is None:
