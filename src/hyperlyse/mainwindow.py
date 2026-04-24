@@ -811,12 +811,38 @@ class MainWindow(QMainWindow):
         return None
 
     def handle_rotate_left_image(self):
-        self.rotation_quadrants = (self.rotation_quadrants - 1) % 4
-        self.update_image_label()
+        self._rotate_image_with_center_preserved(-1)
 
     def handle_rotate_right_image(self):
-        self.rotation_quadrants = (self.rotation_quadrants + 1) % 4
+        self._rotate_image_with_center_preserved(1)
+
+    def _rotate_image_with_center_preserved(self, delta_quadrants):
+        center_data_point = None
+        if self.cube is not None and self.lbl_img.pixmap() is not None:
+            h_scrollbar = self.scroll_img.horizontalScrollBar()
+            v_scrollbar = self.scroll_img.verticalScrollBar()
+            viewport = self.scroll_img.viewport()
+            center_display_x = int(round(h_scrollbar.value() + viewport.width() / 2))
+            center_display_y = int(round(v_scrollbar.value() + viewport.height() / 2))
+            center_data_point = self.display_to_data_point(QPoint(center_display_x, center_display_y))
+
+        self.rotation_quadrants = (self.rotation_quadrants + delta_quadrants) % 4
         self.update_image_label()
+
+        if center_data_point is not None:
+            h_scrollbar = self.scroll_img.horizontalScrollBar()
+            v_scrollbar = self.scroll_img.verticalScrollBar()
+            viewport = self.scroll_img.viewport()
+            scale = self.sl_zoom.value() / 100
+            center_display_after = self.data_to_display_point(center_data_point)
+            center_label_x = center_display_after.x() * scale
+            center_label_y = center_display_after.y() * scale
+            h_scrollbar.setValue(max(h_scrollbar.minimum(),
+                                     min(h_scrollbar.maximum(),
+                                         int(round(center_label_x - viewport.width() / 2)))))
+            v_scrollbar.setValue(max(v_scrollbar.minimum(),
+                                     min(v_scrollbar.maximum(),
+                                         int(round(center_label_y - viewport.height() / 2)))))
 
     def handle_clear_selections(self):
         self.selections.clear()
@@ -1017,6 +1043,30 @@ class MainWindow(QMainWindow):
         p1 = self.display_to_data_point(rect.topLeft())
         p2 = self.display_to_data_point(rect.bottomRight())
         return QRect(p1, p2).normalized()
+
+    def data_to_display_point(self, point):
+        if self.cube is None:
+            return point
+
+        x_data = point.x()
+        y_data = point.y()
+        width = self.cube.ncols
+        height = self.cube.nrows
+
+        if self.rotation_quadrants == 0:
+            x_disp = x_data
+            y_disp = y_data
+        elif self.rotation_quadrants == 1:
+            x_disp = height - 1 - y_data
+            y_disp = x_data
+        elif self.rotation_quadrants == 2:
+            x_disp = width - 1 - x_data
+            y_disp = height - 1 - y_data
+        else:
+            x_disp = y_data
+            y_disp = width - 1 - x_data
+
+        return QPoint(x_disp, y_disp)
 
     def m2i(self, object):
         # convert mouse coordinates on scaled image label to image coordinates
