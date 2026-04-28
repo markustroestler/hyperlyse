@@ -774,6 +774,16 @@ class MainWindow(QMainWindow):
         self.selection_counter += 1
         return sel
 
+    def _renumber_selections(self):
+        """Rebuild selection labels so numbering stays compact."""
+        for i, sel in enumerate(self.selections):
+            sel.index = i
+            if sel.sel_type == 'point' and sel.point is not None:
+                sel.label = f"P{i+1} ({sel.point.x()},{sel.point.y()})"
+            elif sel.sel_type == 'rect' and sel.rect is not None:
+                sel.label = f"R{i+1} ({sel.rect.x()},{sel.rect.y()},{sel.rect.width()}x{sel.rect.height()})"
+        self._sync_legacy_state()
+
     def handle_release_on_image(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             if self.cube is not None:
@@ -783,9 +793,7 @@ class MainWindow(QMainWindow):
                 if self.hovered_selection_idx is not None and not shift_held:
                     self.selections.pop(self.hovered_selection_idx)
                     self.hovered_selection_idx = None
-                    self.selection_counter = len(self.selections)
-                    # Sync legacy state from remaining selections
-                    self._sync_legacy_state()
+                    self._renumber_selections()
                     self.set_recompute_errmap_flag()
                     self.update_image_label()
                     self.update_spectrum_plot()
@@ -803,22 +811,21 @@ class MainWindow(QMainWindow):
                                                 rect.x():rect.x()+rect.width(),
                                                 :]
                     spectrum_y = np.mean(cube_slice, axis=(0, 1))
-                    label = f"R{self.selection_counter+1} ({rect.x()},{rect.y()},{rect.width()}x{rect.height()})"
+                    label = f"R{len(self.selections)+1} ({rect.x()},{rect.y()},{rect.width()}x{rect.height()})"
                     sel = self._make_selection('rect', None, rect, spectrum_y, label)
                 else:
                     pos_img = self.display_to_data_point(event.pos())
                     if 0 <= pos_img.x() < self.cube.ncols and 0 <= pos_img.y() < self.cube.nrows:
                         print(f"Selected point: ({pos_img.x()}, {pos_img.y()})")
                         spectrum_y = self.cube.data[pos_img.y(), pos_img.x(), :]
-                        label = f"P{self.selection_counter+1} ({pos_img.x()},{pos_img.y()})"
+                        label = f"P{len(self.selections)+1} ({pos_img.x()},{pos_img.y()})"
                         sel = self._make_selection('point', pos_img, None, spectrum_y, label)
                     else:
                         sel = None
 
                 if sel is not None:
                     self.selections.append(sel)
-                    # Sync legacy scalar state for backward compat
-                    self._sync_legacy_state()
+                    self._renumber_selections()
 
                 # update ui
                 self.set_recompute_errmap_flag()
