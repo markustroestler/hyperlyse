@@ -3,7 +3,7 @@ import numpy as np
 import numbers
 from dataclasses import dataclass
 from typing import Optional
-from PyQt6.QtGui import QPixmap, QImage, QGuiApplication, QShortcut, QKeySequence
+from PyQt6.QtGui import QPixmap, QImage, QGuiApplication, QShortcut, QKeySequence, QIcon
 from PyQt6.QtCore import Qt, QUrl, QRect, QPoint, QSize
 from PyQt6.QtWidgets import QMainWindow, QFileDialog, QMessageBox, QRubberBand, QDoubleSpinBox, QRadioButton
 from PyQt6.QtWidgets import QWidget, QLabel, QCheckBox, QSlider, QPushButton, QComboBox, QSpinBox, QFrame, QLineEdit
@@ -100,22 +100,6 @@ class MainWindow(QMainWindow):
 
         layout_img_rotate = QHBoxLayout()
         layout_img.addLayout(layout_img_rotate)
-
-        self.btn_rotate_left = QPushButton('Rotate Left\n90°')
-        self.btn_rotate_left.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum))
-        self.btn_rotate_left.pressed.connect(self.handle_rotate_left_image)
-        layout_img_rotate.addWidget(self.btn_rotate_left)
-
-        self.btn_rotate_right = QPushButton('Rotate Right\n90°')
-        self.btn_rotate_right.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum))
-        self.btn_rotate_right.pressed.connect(self.handle_rotate_right_image)
-        layout_img_rotate.addWidget(self.btn_rotate_right)
-
-        self.btn_clear_selections = QPushButton('Clear All\nSelections')
-        self.btn_clear_selections.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum))
-        self.btn_clear_selections.pressed.connect(self.handle_clear_selections)
-        layout_img_rotate.addWidget(self.btn_clear_selections)
-
         layout_img_rotate.addStretch()
 
         # Ctrl+Z shortcut to undo last selection
@@ -144,30 +128,96 @@ class MainWindow(QMainWindow):
 
         # viewing controls
         layout_img_ctrl = QGridLayout()
+        layout_img_ctrl.setSpacing(12)
+        layout_img_ctrl.setContentsMargins(0, 8, 0, 8)
         layout_img.addLayout(layout_img_ctrl)
         lbl_zoom_static = QLabel('Zoom')
         layout_img_ctrl.addWidget(lbl_zoom_static, 0, 0)
+        layout_img_ctrl.setAlignment(lbl_zoom_static, Qt.AlignmentFlag.AlignVCenter)
         self.sl_zoom = QSlider(cw)
         self.sl_zoom.setOrientation(Qt.Orientation.Horizontal)
         self.sl_zoom.setMinimum(25)
         self.sl_zoom.setMaximum(800)
         self.sl_zoom.setValue(100)
+        self.sl_zoom.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum))
         self.sl_zoom.valueChanged.connect(self.update_image_label)
         layout_img_ctrl.addWidget(self.sl_zoom, 0, 1)
+        layout_img_ctrl.setAlignment(self.sl_zoom, Qt.AlignmentFlag.AlignVCenter)
         self.lbl_zoom = QLabel('100%')
         layout_img_ctrl.addWidget(self.lbl_zoom, 0, 2)
+        layout_img_ctrl.setAlignment(self.lbl_zoom, Qt.AlignmentFlag.AlignVCenter)
 
         lbl_brightness_static = QLabel('Brightness')
         layout_img_ctrl.addWidget(lbl_brightness_static, 1, 0)
+        layout_img_ctrl.setAlignment(lbl_brightness_static, Qt.AlignmentFlag.AlignVCenter)
         self.sl_brightness = QSlider(cw)
         self.sl_brightness.setOrientation(Qt.Orientation.Horizontal)
         self.sl_brightness.setMinimum(0)
         self.sl_brightness.setMaximum(300)
         self.sl_brightness.setValue(100)
+        self.sl_brightness.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum))
         self.sl_brightness.valueChanged.connect(self.update_image_label)
         layout_img_ctrl.addWidget(self.sl_brightness, 1, 1)
+        layout_img_ctrl.setAlignment(self.sl_brightness, Qt.AlignmentFlag.AlignVCenter)
         self.lbl_brightness = QLabel('100%')
         layout_img_ctrl.addWidget(self.lbl_brightness, 1, 2)
+        layout_img_ctrl.setAlignment(self.lbl_brightness, Qt.AlignmentFlag.AlignVCenter)
+
+        # Action buttons group (stacked)
+        layout_buttons = QVBoxLayout()
+        layout_buttons.setSpacing(4)
+        layout_buttons.setContentsMargins(0, 0, 0, 0)
+
+        # Rotation and clear buttons (use SVG icons)
+        icons_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', 'icons'))
+
+        self.btn_rotate_left = QPushButton()
+        self.btn_rotate_left.setMinimumWidth(92)
+        self.btn_rotate_left.setMinimumHeight(28)
+        icon_left = QIcon(os.path.join(icons_dir, 'rotate-ccw.svg'))
+        self.btn_rotate_left.setIcon(icon_left)
+        self.btn_rotate_left.setIconSize(QSize(14, 14))
+        self.btn_rotate_left.setText('Rotate left')
+        self.btn_rotate_left.setToolTip('Rotate Left 90\u00B0')
+        self.btn_rotate_left.pressed.connect(self.handle_rotate_left_image)
+        self.btn_rotate_left.setContentsMargins(0, 0, 0, 0)
+        layout_buttons.addWidget(self.btn_rotate_left)
+        layout_buttons.setAlignment(self.btn_rotate_left, Qt.AlignmentFlag.AlignHCenter)
+
+        self.btn_rotate_right = QPushButton()
+        self.btn_rotate_right.setMinimumWidth(92)
+        self.btn_rotate_right.setMinimumHeight(28)
+        icon_right = QIcon(os.path.join(icons_dir, 'rotate-cw.svg'))
+        self.btn_rotate_right.setIcon(icon_right)
+        self.btn_rotate_right.setIconSize(QSize(14, 14))
+        self.btn_rotate_right.setText('Rotate right')
+        self.btn_rotate_right.setToolTip('Rotate Right 90\u00B0')
+        self.btn_rotate_right.pressed.connect(self.handle_rotate_right_image)
+        self.btn_rotate_right.setContentsMargins(0, 0, 0, 0)
+        layout_buttons.addWidget(self.btn_rotate_right)
+        layout_buttons.setAlignment(self.btn_rotate_right, Qt.AlignmentFlag.AlignHCenter)
+
+        self.btn_clear_selections = QPushButton('Clear selection')
+        self.btn_clear_selections.setMinimumWidth(92)
+        self.btn_clear_selections.setMinimumHeight(28)
+        self.btn_clear_selections.setToolTip('Clear All Selections')
+        self.btn_clear_selections.pressed.connect(self.handle_clear_selections)
+        self.btn_clear_selections.setContentsMargins(0, 0, 0, 0)
+        layout_buttons.addWidget(self.btn_clear_selections)
+        layout_buttons.setAlignment(self.btn_clear_selections, Qt.AlignmentFlag.AlignHCenter)
+
+        # push remaining space so save sits at the bottom edge
+        layout_buttons.addStretch()
+
+        # save image (aligned to bottom of the stack)
+        self.btn_save_img = QPushButton('Save Image')
+        self.btn_save_img.setMinimumWidth(92)
+        self.btn_save_img.setMinimumHeight(28)
+        self.btn_save_img.setContentsMargins(0, 0, 0, 0)
+        self.btn_save_img.pressed.connect(self.handle_action_export_image)
+        layout_buttons.addWidget(self.btn_save_img)
+
+        layout_img_ctrl.addLayout(layout_buttons, 0, 3, 3, 2)
 
         # content controls
         lbl_img_display = QLabel(cw)
@@ -177,8 +227,8 @@ class MainWindow(QMainWindow):
 
         self.tabs_img_ctrl = QTabWidget(cw)
         self.tabs_img_ctrl.currentChanged.connect(self.update_image_label)
-        self.tabs_img_ctrl.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum))
-        layout_img_ctrl.addWidget(self.tabs_img_ctrl, 2, 1)
+        self.tabs_img_ctrl.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum))
+        layout_img_ctrl.addWidget(self.tabs_img_ctrl, 2, 1, 1, 2)
 
         # RGB -> index 0
         tab_rgb = QWidget()
@@ -255,13 +305,6 @@ class MainWindow(QMainWindow):
         self.lbl_component = QLabel(tab_pca)
         self.lbl_component.setText("0")
         tab_pca.layout().addWidget(self.lbl_component)
-
-        # save image
-        self.btn_save_img = QPushButton('Save\nImage')
-        self.btn_save_img.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum))
-        layout_img_ctrl.addWidget(self.btn_save_img, 2, 2)
-        self.btn_save_img.pressed.connect(self.handle_action_export_image)
-
 
         # add separator
         line = QFrame()
@@ -788,10 +831,10 @@ class MainWindow(QMainWindow):
     def _sync_legacy_state(self):
         """Sync scalar point_selection/rect_selection/spectrum_y from selections list."""
         if self.selections:
-            last = self.selections[-1]
-            self.spectrum_y = last.spectrum_y
-            self.point_selection = last.point if last.sel_type == 'point' else None
-            self.rect_selection = last.rect if last.sel_type == 'rect' else None
+            first = self.selections[0]
+            self.spectrum_y = first.spectrum_y
+            self.point_selection = first.point if first.sel_type == 'point' else None
+            self.rect_selection = first.rect if first.sel_type == 'rect' else None
         else:
             self.spectrum_y = None
             self.point_selection = None
@@ -972,7 +1015,7 @@ class MainWindow(QMainWindow):
                     dir_default = self.db.root
                 else:
                     dir_default = '.'
-                filename_default = f"{self.dataset_name()}_{spectrum.metadata.id}_{self.selection_str()}.jdx"
+                filename_default = f"{spectrum.metadata.id}_{self.selection_str()}_{self.dataset_name()}.jdx"
                 file_spectrum, _ = QFileDialog.getSaveFileName(None, "Save spectrum", os.path.join(dir_default, filename_default),
                                                                "JCAMP-DX (*.jdx *.dx *jcm);;Plain x,y pairs (*.dpt *.csv *.txt )")
                 if file_spectrum:
