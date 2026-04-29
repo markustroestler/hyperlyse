@@ -1,4 +1,5 @@
 import os
+import sys
 import numpy as np
 import numbers
 from dataclasses import dataclass
@@ -129,7 +130,7 @@ class MainWindow(QMainWindow):
         # viewing controls
         layout_img_ctrl = QGridLayout()
         layout_img_ctrl.setSpacing(12)
-        layout_img_ctrl.setContentsMargins(0, 8, 0, 8)
+        layout_img_ctrl.setContentsMargins(0, 2, 0, 2)
         layout_img.addLayout(layout_img_ctrl)
         lbl_zoom_static = QLabel('Zoom')
         layout_img_ctrl.addWidget(lbl_zoom_static, 0, 0)
@@ -169,11 +170,11 @@ class MainWindow(QMainWindow):
         layout_buttons.setContentsMargins(0, 0, 0, 0)
 
         # Rotation and clear buttons (use SVG icons)
-        icons_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', 'icons'))
+        icons_dir = self.resource_path('icons')
 
         self.btn_rotate_left = QPushButton()
-        self.btn_rotate_left.setMinimumWidth(92)
-        self.btn_rotate_left.setMinimumHeight(28)
+        self.btn_rotate_left.setMinimumWidth(110)
+        self.btn_rotate_left.setMinimumHeight(30)
         icon_left = QIcon(os.path.join(icons_dir, 'rotate-ccw.svg'))
         self.btn_rotate_left.setIcon(icon_left)
         self.btn_rotate_left.setIconSize(QSize(14, 14))
@@ -185,8 +186,8 @@ class MainWindow(QMainWindow):
         layout_buttons.setAlignment(self.btn_rotate_left, Qt.AlignmentFlag.AlignHCenter)
 
         self.btn_rotate_right = QPushButton()
-        self.btn_rotate_right.setMinimumWidth(92)
-        self.btn_rotate_right.setMinimumHeight(28)
+        self.btn_rotate_right.setMinimumWidth(110)
+        self.btn_rotate_right.setMinimumHeight(30)
         icon_right = QIcon(os.path.join(icons_dir, 'rotate-cw.svg'))
         self.btn_rotate_right.setIcon(icon_right)
         self.btn_rotate_right.setIconSize(QSize(14, 14))
@@ -198,8 +199,8 @@ class MainWindow(QMainWindow):
         layout_buttons.setAlignment(self.btn_rotate_right, Qt.AlignmentFlag.AlignHCenter)
 
         self.btn_clear_selections = QPushButton('Clear selection')
-        self.btn_clear_selections.setMinimumWidth(92)
-        self.btn_clear_selections.setMinimumHeight(28)
+        self.btn_clear_selections.setMinimumWidth(110)
+        self.btn_clear_selections.setMinimumHeight(30)
         self.btn_clear_selections.setToolTip('Clear All Selections')
         self.btn_clear_selections.pressed.connect(self.handle_clear_selections)
         self.btn_clear_selections.setContentsMargins(0, 0, 0, 0)
@@ -207,12 +208,12 @@ class MainWindow(QMainWindow):
         layout_buttons.setAlignment(self.btn_clear_selections, Qt.AlignmentFlag.AlignHCenter)
 
         # push remaining space so save sits at the bottom edge
-        layout_buttons.addStretch()
+        
 
         # save image (aligned to bottom of the stack)
         self.btn_save_img = QPushButton('Save Image')
-        self.btn_save_img.setMinimumWidth(92)
-        self.btn_save_img.setMinimumHeight(28)
+        self.btn_save_img.setMinimumWidth(110)
+        self.btn_save_img.setMinimumHeight(30)
         self.btn_save_img.setContentsMargins(0, 0, 0, 0)
         self.btn_save_img.pressed.connect(self.handle_action_export_image)
         layout_buttons.addWidget(self.btn_save_img)
@@ -445,7 +446,7 @@ class MainWindow(QMainWindow):
         # layout_spectra.addLayout(layout_export_ctrl)
         #
         btn_export = QPushButton(cw)
-        btn_export.setText('Save\nSpectrum')
+        btn_export.setText('Save\nSpectra')
         btn_export.clicked.connect(self.handle_action_export_spectrum)
         btn_export.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum))
         layout_spectra_ctrl.addWidget(btn_export, 1, 2, 2, 1)
@@ -467,7 +468,7 @@ class MainWindow(QMainWindow):
         action_save_img = menu_file.addAction('&Save current image...')
         action_save_img.triggered.connect(self.handle_action_export_image)
 
-        action_export_spectrum = menu_file.addAction('&Save selected spectrum...')
+        action_export_spectrum = menu_file.addAction('&Save selected spectra...')
         action_export_spectrum.triggered.connect(self.handle_action_export_spectrum)
 
         # info menu
@@ -489,7 +490,7 @@ class MainWindow(QMainWindow):
 
         if self.rawfile is None:
             img_startup = QPixmap()
-            img_startup.load('startup.png')
+            img_startup.load(self.resource_path('startup.png'))
             wi = int(self.width() * self.config.initial_image_width_ratio)
             img_startup = img_startup.scaled(wi, wi, transformMode=Qt.TransformationMode.SmoothTransformation)
             self.lbl_img.setPixmap(img_startup)
@@ -504,6 +505,11 @@ class MainWindow(QMainWindow):
                          self.config.infotext(),
                          QMessageBox.StandardButton.Close)
         mb.exec()
+
+    def resource_path(self, relative_path):
+        if hasattr(sys, '_MEIPASS'):
+            return os.path.join(sys._MEIPASS, relative_path)
+        return os.path.normpath(os.path.join(os.path.dirname(__file__), '..', relative_path))
 
     ##############
     # UI updates
@@ -1002,35 +1008,79 @@ class MainWindow(QMainWindow):
             self.lbl_img.pixmap().save(fileName)
 
     def handle_action_export_spectrum(self):
-        if self.spectrum_y is not None:
+        if not self.selections or self.cube is None:
+            return
+
+        export_dir_default = self.last_export_dir if self.last_export_dir else (self.db.root if self.db is not None else '.')
+        export_dir = None
+        export_ext = None
+        image = np.uint8(self.rgb * (255 / self.rgb.max()))
+        image = self.draw_marker(image)
+
+        for selection in list(self.selections):
+            selection_key = self._selection_short_label(selection)
             source_name_default = self.last_source_name if self.last_source_name else self.dataset_name()
-            info_dialog = hyper.SaveSpectrumDialog(self, source_name_default)
-            if info_dialog.exec() == QDialog.DialogCode.Accepted:
-                info_dialog_result = info_dialog.get_data()
-                self.last_source_name = info_dialog_result['source']
-                metadata = hyper.Metadata(id=info_dialog_result['id'],
-                                          description=info_dialog_result['description'],
-                                          source_object=info_dialog_result['source'],
-                                          source_file=self.dataset_name(),
-                                          source_coordinates=self.selection_str(),
-                                          device_info=f"{self.cube.device} / Hyperlyse {self.config.version}",
-                                          intensity=info_dialog_result['intensity'])
-                spectrum = hyper.Spectrum(self.cube.bands, self.spectrum_y, metadata)
-                if self.last_export_dir:
-                    dir_default = self.last_export_dir
-                elif self.db is not None:
-                    dir_default = self.db.root
-                else:
-                    dir_default = '.'
-                filename_default = f"{spectrum.metadata.id}_{self.selection_str()}_{self.dataset_name()}.jdx"
-                file_spectrum, _ = QFileDialog.getSaveFileName(None, "Save spectrum", os.path.join(dir_default, filename_default),
-                                                               "JCAMP-DX (*.jdx *.dx *jcm);;Plain x,y pairs (*.dpt *.csv *.txt )")
-                if file_spectrum:
-                    img = np.uint8(self.rgb * (255 / self.rgb.max()))
-                    img = self.draw_marker(img)
-                    hyper.Database.export_spectrum(file_spectrum,
-                                                   spectrum,
-                                                   image=img)
+            header_text = f'Enter metadata for {selection_key}'
+            info_dialog = hyper.SaveSpectrumDialog(
+                self,
+                source_name_default,
+                header_text=header_text,
+                header_color=selection.color_rgb,
+            )
+            dialog_code = info_dialog.exec()
+            info_dialog_result = info_dialog.get_data()
+
+            if info_dialog_result['action'] == 'cancel' or dialog_code != QDialog.DialogCode.Accepted and info_dialog_result['action'] != 'skip':
+                break
+            if info_dialog_result['action'] == 'skip':
+                continue
+
+            self.last_source_name = info_dialog_result['source']
+            metadata = hyper.Metadata(id=info_dialog_result['id'],
+                                      description=info_dialog_result['description'],
+                                      source_object=info_dialog_result['source'],
+                                      source_file=self.dataset_name(),
+                                      source_coordinates=self.selection_str(selection),
+                                      device_info=f"{self.cube.device} / Hyperlyse {self.config.version}",
+                                      intensity=info_dialog_result['intensity'])
+            spectrum = hyper.Spectrum(self.cube.bands, selection.spectrum_y, metadata)
+
+            if export_dir is None:
+                filename_default = self._selection_export_filename(selection, spectrum.metadata.id, '.jdx')
+                file_spectrum, _ = QFileDialog.getSaveFileName(
+                    None,
+                    'Save spectrum',
+                    os.path.join(export_dir_default, filename_default),
+                    'JCAMP-DX (*.jdx *.dx *jcm);;Plain x,y pairs (*.dpt *.csv *.txt )',
+                )
+                if not file_spectrum:
+                    break
+                export_dir = os.path.dirname(file_spectrum)
+                export_ext = os.path.splitext(file_spectrum)[1] or '.jdx'
+                self.last_export_dir = export_dir
+            else:
+                export_base = self._selection_export_stem(selection, spectrum.metadata.id)
+                file_spectrum = os.path.join(export_dir, f'{export_base}{export_ext}')
+
+            if not os.path.splitext(file_spectrum)[1]:
+                file_spectrum = f'{file_spectrum}.jdx'
+
+            hyper.Database.export_spectrum(
+                file_spectrum,
+                spectrum,
+                image=image,
+            )
+
+    def _selection_short_label(self, selection):
+        if selection is None or not selection.label:
+            return ''
+        return selection.label.split(' ', 1)[0]
+
+    def _selection_export_stem(self, selection, spectrum_id):
+        return f'{spectrum_id}_{self.selection_str(selection)}_{self.dataset_name()}'
+
+    def _selection_export_filename(self, selection, spectrum_id, extension):
+        return f'{self._selection_export_stem(selection, spectrum_id)}{extension}'
 
 
     def handle_action_set_db_dir(self):
@@ -1197,21 +1247,24 @@ class MainWindow(QMainWindow):
         img = img * (1 - self.config.marker_alpha) + img_marker * self.config.marker_alpha
         return img.astype(np.uint8)
 
-    def selection_coords(self):
-        if not self.selections:
+    def selection_coords(self, selection=None):
+        if selection is None:
+            if not self.selections:
+                return []
+            selection = self.selections[-1]
+        if selection is None:
             return []
-        sel = self.selections[-1]
-        if sel.sel_type == 'rect':
-            r = sel.rect
+        if selection.sel_type == 'rect':
+            r = selection.rect
             return [r.left(), r.top(), r.width(), r.height()]
-        elif sel.sel_type == 'point':
-            p = sel.point
+        elif selection.sel_type == 'point':
+            p = selection.point
             return [p.x(), p.y()]
         else:
             return []
 
-    def selection_str(self):
-        return f'({",".join([str(c) for c in self.selection_coords()])})'
+    def selection_str(self, selection=None):
+        return f'({",".join([str(c) for c in self.selection_coords(selection)])})'
 
     def get_lambda_slider_text(self, layer_idx):
         return '%.1fnm' % self.cube.bands[layer_idx]
