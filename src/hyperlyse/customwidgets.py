@@ -2,7 +2,7 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from PyQt6.QtWidgets import (QSizePolicy, QDialog, QFormLayout, QLabel, QLineEdit, QComboBox,
                               QPushButton, QVBoxLayout, QHBoxLayout, QHBoxLayout, QPushButton, QCheckBox, QSpinBox,
-                              QFileDialog)
+                              QFileDialog, QDialogButtonBox)
 from PyQt6.QtCore import QSize, Qt
 
 class PlotCanvas(FigureCanvas):

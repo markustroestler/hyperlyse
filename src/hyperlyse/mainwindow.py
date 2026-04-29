@@ -1,5 +1,6 @@
 import os
 import sys
+import traceback
 import numpy as np
 import numbers
 from dataclasses import dataclass
@@ -12,6 +13,7 @@ from PyQt6.QtWidgets import QHBoxLayout, QVBoxLayout, QGridLayout, QTabWidget, Q
 from PyQt6.QtWidgets import QProgressDialog
 from matplotlib import pyplot as plt
 import hyperlyse as hyper
+from hyperlyse import cube_analyzer
 
 SELECTION_COLORS = [
     [228,  26,  28],  # red
@@ -74,7 +76,7 @@ class CubeAnalysisWorker(QThread):
                 progress_callback=on_progress)
             self.finished.emit(self._analyzed, self._skipped)
         except Exception as e:
-            self.error.emit(str(e))
+            self.error.emit(traceback.format_exc())
 
 
 class CubeSearchWorker(QThread):
@@ -117,7 +119,7 @@ class CubeSearchWorker(QThread):
                 progress_callback=on_progress)
             self.finished.emit(results)
         except Exception as e:
-            self.error.emit(str(e))
+            self.error.emit(traceback.format_exc())
 
 
 class CubeLoadingWorker(QThread):
@@ -150,7 +152,7 @@ class CubeLoadingWorker(QThread):
             # Emit cube object with the RGB already computed
             self.finished.emit(cube)
         except Exception as e:
-            self.error.emit(str(e))
+            self.error.emit(traceback.format_exc())
 
     def cancel(self):
         """Cancel the loading operation."""
@@ -221,7 +223,7 @@ class CubeLoadingDialog(QDialog):
 
     def set_error(self, message):
         """Show error message and change button to Close."""
-        self.status_label.setText(f"Error: {message}")
+        self.status_label.setText(f"Error while loading cube:\n{message}")
         self.cancel_button.setText("Close")
         self.cancel_button.clicked.disconnect()
         self.cancel_button.clicked.connect(self.reject)
@@ -950,8 +952,6 @@ class MainWindow(QMainWindow):
                 else:
                     self.cube_search_results = []
                     self._update_cube_result_tabs()
-                                       hold=True,
-                                       defer_draw=True)
 
         # Single draw after all plot calls
         self.plot.draw()
@@ -996,8 +996,7 @@ class MainWindow(QMainWindow):
 
     def _on_cube_load_error(self, error_message):
         """Handle cube loading error."""
-        print("Error loading file: ")
-        print(error_message)
+        print(f"Error loading file:\n{error_message}")
         self.loading_dialog.set_error(error_message)
 
 

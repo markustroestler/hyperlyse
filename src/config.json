@@ -24,6 +24,6 @@
   "SAMPLE_RATE": 1,
   "SEARCH_IN_DB": false,
   "SEARCH_IN_CUBES": true,
-  "NUM_HITS": 5,
+  "NUM_HITS": 10,
   "USE_PCA": false
 }
