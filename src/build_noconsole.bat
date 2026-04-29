@@ -1,1 +1,1 @@
-pyinstaller --noconfirm --noconsole --icon=icon.ico --hidden-import="sklearn.utils._typedefs" --add-data "config.json;." --add-data "startup.png;." --distpath "../dist" --workpath "../build" --name hyperlyse main.py
+pyinstaller --noconfirm --noconsole --icon=icon.ico --hidden-import="sklearn.utils._typedefs" --add-data "config.json;." --add-data "startup.png;." --add-data "icons;icons" --distpath "../dist" --workpath "../build" --name hyperlyse main.py

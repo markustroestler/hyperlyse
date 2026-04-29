@@ -1,0 +1,2 @@
+buttons next to slider (slider shorter) smaller + icons
+windows same height

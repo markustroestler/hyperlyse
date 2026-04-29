@@ -1,7 +1,10 @@
 import os
+import sys
 import numpy as np
 import numbers
-from PyQt6.QtGui import QPixmap, QImage, QGuiApplication
+from dataclasses import dataclass
+from typing import Optional
+from PyQt6.QtGui import QPixmap, QImage, QGuiApplication, QShortcut, QKeySequence, QIcon
 from PyQt6.QtCore import Qt, QUrl, QRect, QPoint, QSize, QThread, pyqtSignal, QTimer, QTime
 from PyQt6.QtWidgets import QMainWindow, QFileDialog, QMessageBox, QRubberBand, QDoubleSpinBox, QRadioButton
 from PyQt6.QtWidgets import QWidget, QLabel, QCheckBox, QSlider, QPushButton, QComboBox, QSpinBox, QFrame, QLineEdit
@@ -9,7 +12,33 @@ from PyQt6.QtWidgets import QHBoxLayout, QVBoxLayout, QGridLayout, QTabWidget, Q
 from PyQt6.QtWidgets import QProgressDialog
 from matplotlib import pyplot as plt
 import hyperlyse as hyper
-from hyperlyse import cube_analyzer
+
+SELECTION_COLORS = [
+    [228,  26,  28],  # red
+    [ 55, 126, 184],  # blue
+    [ 77, 175,  74],  # green
+    [152,  78, 163],  # purple
+    [255, 127,   0],  # orange
+    [255, 255,  51],  # yellow
+    [166,  86,  40],  # brown
+    [247, 129, 191],  # pink
+    [153, 153, 153],  # grey
+    [  0, 210, 213],  # cyan
+]
+
+HOVER_TOLERANCE = 4  # pixels in data coordinates for hit-testing
+
+
+@dataclass
+class Selection:
+    sel_type: str                   # 'point' or 'rect'
+    point: Optional[QPoint]         # set when sel_type == 'point'
+    rect: Optional[QRect]           # set when sel_type == 'rect'
+    spectrum_y: np.ndarray          # 1D (nbands,)
+    color_rgb: list                 # [R,G,B] 0-255, for image overlay
+    color_mpl: tuple                # (r,g,b) 0.0-1.0, for matplotlib
+    label: str                      # e.g. "P1 (120,45)" or "R2 (10,20,30x40)"
+    index: int                      # monotonic ID
 
 hyper_quotes = ['"Hyper, hyper. We need the bass drum." - H.P. Baxxter',
                 '"Travelling through hyper space ain\'t like dusting crops, boy!" - Han Solo']
@@ -215,6 +244,9 @@ class MainWindow(QMainWindow):
         self.point_selection = None
         self.rect_selection = None
         self.spectrum_y = None
+        self.selections = []              # list[Selection]
+        self.selection_counter = 0        # monotonic, wraps color cycle
+        self.hovered_selection_idx = None  # index into selections, or None
         self.rawfile = rawfile
 
         self.zoom = 1.0
@@ -268,18 +300,11 @@ class MainWindow(QMainWindow):
 
         layout_img_rotate = QHBoxLayout()
         layout_img.addLayout(layout_img_rotate)
-
-        self.btn_rotate_left = QPushButton('Rotate Left\n90°')
-        self.btn_rotate_left.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum))
-        self.btn_rotate_left.pressed.connect(self.handle_rotate_left_image)
-        layout_img_rotate.addWidget(self.btn_rotate_left)
-
-        self.btn_rotate_right = QPushButton('Rotate Right\n90°')
-        self.btn_rotate_right.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum))
-        self.btn_rotate_right.pressed.connect(self.handle_rotate_right_image)
-        layout_img_rotate.addWidget(self.btn_rotate_right)
-
         layout_img_rotate.addStretch()
+
+        # Ctrl+Z shortcut to undo last selection
+        self.shortcut_undo = QShortcut(QKeySequence('Ctrl+Z'), self)
+        self.shortcut_undo.activated.connect(self.handle_undo_selection)
 
         # Cube results tabs (above the image)
         self.tabs_cube_results = QTabWidget(cw)
@@ -290,6 +315,7 @@ class MainWindow(QMainWindow):
         layout_img.addWidget(self.tabs_cube_results)
 
         self.lbl_img = QLabel(cw)
+        self.lbl_img.setMouseTracking(True)
         self.lbl_img.mousePressEvent = self.handle_click_on_image
         self.lbl_img.mouseMoveEvent = self.handle_move_on_image
         self.lbl_img.mouseReleaseEvent = self.handle_release_on_image
@@ -301,6 +327,8 @@ class MainWindow(QMainWindow):
         self.rubberband_selector.setGeometry(QRect(0, 0, 0, 0))
         self.scroll_img = QScrollArea(cw)
         self.scroll_img.setWidget(self.lbl_img)
+        self.scroll_img.setWidgetResizable(True)
+        self.lbl_img.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.scroll_img.mousePressEvent = self.handle_click_on_image_scroll
         self.scroll_img.mouseMoveEvent = self.handle_move_on_image_scroll
         self.scroll_img.wheelEvent = self.handle_wheel_on_image_scroll
@@ -308,30 +336,96 @@ class MainWindow(QMainWindow):
 
         # viewing controls
         layout_img_ctrl = QGridLayout()
+        layout_img_ctrl.setSpacing(12)
+        layout_img_ctrl.setContentsMargins(0, 2, 0, 2)
         layout_img.addLayout(layout_img_ctrl)
         lbl_zoom_static = QLabel('Zoom')
         layout_img_ctrl.addWidget(lbl_zoom_static, 0, 0)
+        layout_img_ctrl.setAlignment(lbl_zoom_static, Qt.AlignmentFlag.AlignVCenter)
         self.sl_zoom = QSlider(cw)
         self.sl_zoom.setOrientation(Qt.Orientation.Horizontal)
         self.sl_zoom.setMinimum(25)
         self.sl_zoom.setMaximum(800)
         self.sl_zoom.setValue(100)
+        self.sl_zoom.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum))
         self.sl_zoom.valueChanged.connect(self.update_image_label)
         layout_img_ctrl.addWidget(self.sl_zoom, 0, 1)
+        layout_img_ctrl.setAlignment(self.sl_zoom, Qt.AlignmentFlag.AlignVCenter)
         self.lbl_zoom = QLabel('100%')
         layout_img_ctrl.addWidget(self.lbl_zoom, 0, 2)
+        layout_img_ctrl.setAlignment(self.lbl_zoom, Qt.AlignmentFlag.AlignVCenter)
 
         lbl_brightness_static = QLabel('Brightness')
         layout_img_ctrl.addWidget(lbl_brightness_static, 1, 0)
+        layout_img_ctrl.setAlignment(lbl_brightness_static, Qt.AlignmentFlag.AlignVCenter)
         self.sl_brightness = QSlider(cw)
         self.sl_brightness.setOrientation(Qt.Orientation.Horizontal)
         self.sl_brightness.setMinimum(0)
         self.sl_brightness.setMaximum(300)
         self.sl_brightness.setValue(100)
+        self.sl_brightness.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum))
         self.sl_brightness.valueChanged.connect(self.update_image_label)
         layout_img_ctrl.addWidget(self.sl_brightness, 1, 1)
+        layout_img_ctrl.setAlignment(self.sl_brightness, Qt.AlignmentFlag.AlignVCenter)
         self.lbl_brightness = QLabel('100%')
         layout_img_ctrl.addWidget(self.lbl_brightness, 1, 2)
+        layout_img_ctrl.setAlignment(self.lbl_brightness, Qt.AlignmentFlag.AlignVCenter)
+
+        # Action buttons group (stacked)
+        layout_buttons = QVBoxLayout()
+        layout_buttons.setSpacing(4)
+        layout_buttons.setContentsMargins(0, 0, 0, 0)
+
+        # Rotation and clear buttons (use SVG icons)
+        icons_dir = self.resource_path('icons')
+
+        self.btn_rotate_left = QPushButton()
+        self.btn_rotate_left.setMinimumWidth(110)
+        self.btn_rotate_left.setMinimumHeight(30)
+        icon_left = QIcon(os.path.join(icons_dir, 'rotate-ccw.svg'))
+        self.btn_rotate_left.setIcon(icon_left)
+        self.btn_rotate_left.setIconSize(QSize(14, 14))
+        self.btn_rotate_left.setText('Rotate left')
+        self.btn_rotate_left.setToolTip('Rotate Left 90\u00B0')
+        self.btn_rotate_left.pressed.connect(self.handle_rotate_left_image)
+        self.btn_rotate_left.setContentsMargins(0, 0, 0, 0)
+        layout_buttons.addWidget(self.btn_rotate_left)
+        layout_buttons.setAlignment(self.btn_rotate_left, Qt.AlignmentFlag.AlignHCenter)
+
+        self.btn_rotate_right = QPushButton()
+        self.btn_rotate_right.setMinimumWidth(110)
+        self.btn_rotate_right.setMinimumHeight(30)
+        icon_right = QIcon(os.path.join(icons_dir, 'rotate-cw.svg'))
+        self.btn_rotate_right.setIcon(icon_right)
+        self.btn_rotate_right.setIconSize(QSize(14, 14))
+        self.btn_rotate_right.setText('Rotate right')
+        self.btn_rotate_right.setToolTip('Rotate Right 90\u00B0')
+        self.btn_rotate_right.pressed.connect(self.handle_rotate_right_image)
+        self.btn_rotate_right.setContentsMargins(0, 0, 0, 0)
+        layout_buttons.addWidget(self.btn_rotate_right)
+        layout_buttons.setAlignment(self.btn_rotate_right, Qt.AlignmentFlag.AlignHCenter)
+
+        self.btn_clear_selections = QPushButton('Clear selection')
+        self.btn_clear_selections.setMinimumWidth(110)
+        self.btn_clear_selections.setMinimumHeight(30)
+        self.btn_clear_selections.setToolTip('Clear All Selections')
+        self.btn_clear_selections.pressed.connect(self.handle_clear_selections)
+        self.btn_clear_selections.setContentsMargins(0, 0, 0, 0)
+        layout_buttons.addWidget(self.btn_clear_selections)
+        layout_buttons.setAlignment(self.btn_clear_selections, Qt.AlignmentFlag.AlignHCenter)
+
+        # push remaining space so save sits at the bottom edge
+        
+
+        # save image (aligned to bottom of the stack)
+        self.btn_save_img = QPushButton('Save Image')
+        self.btn_save_img.setMinimumWidth(110)
+        self.btn_save_img.setMinimumHeight(30)
+        self.btn_save_img.setContentsMargins(0, 0, 0, 0)
+        self.btn_save_img.pressed.connect(self.handle_action_export_image)
+        layout_buttons.addWidget(self.btn_save_img)
+
+        layout_img_ctrl.addLayout(layout_buttons, 0, 3, 3, 2)
 
         # content controls
         lbl_img_display = QLabel(cw)
@@ -341,8 +435,8 @@ class MainWindow(QMainWindow):
 
         self.tabs_img_ctrl = QTabWidget(cw)
         self.tabs_img_ctrl.currentChanged.connect(self.update_image_label)
-        self.tabs_img_ctrl.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum))
-        layout_img_ctrl.addWidget(self.tabs_img_ctrl, 2, 1)
+        self.tabs_img_ctrl.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum))
+        layout_img_ctrl.addWidget(self.tabs_img_ctrl, 2, 1, 1, 2)
 
         # RGB -> index 0
         tab_rgb = QWidget()
@@ -419,13 +513,6 @@ class MainWindow(QMainWindow):
         self.lbl_component = QLabel(tab_pca)
         self.lbl_component.setText("0")
         tab_pca.layout().addWidget(self.lbl_component)
-
-        # save image
-        self.btn_save_img = QPushButton('Save\nImage')
-        self.btn_save_img.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum))
-        layout_img_ctrl.addWidget(self.btn_save_img, 2, 2)
-        self.btn_save_img.pressed.connect(self.handle_action_export_image)
-
 
         # add separator
         line = QFrame()
@@ -556,7 +643,7 @@ class MainWindow(QMainWindow):
         # layout_spectra.addLayout(layout_export_ctrl)
         #
         btn_export = QPushButton(cw)
-        btn_export.setText('Save\nSpectrum')
+        btn_export.setText('Save\nSpectra')
         btn_export.clicked.connect(self.handle_action_export_spectrum)
         btn_export.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum))
         layout_spectra_ctrl.addWidget(btn_export, 1, 2, 2, 1)
@@ -575,7 +662,7 @@ class MainWindow(QMainWindow):
         action_save_img = menu_file.addAction('&Save current image...')
         action_save_img.triggered.connect(self.handle_action_export_image)
 
-        action_export_spectrum = menu_file.addAction('&Save selected spectrum...')
+        action_export_spectrum = menu_file.addAction('&Save selected spectra...')
         action_export_spectrum.triggered.connect(self.handle_action_export_spectrum)
 
         # settings menu
@@ -635,7 +722,7 @@ class MainWindow(QMainWindow):
 
         if self.rawfile is None:
             img_startup = QPixmap()
-            img_startup.load('startup.png')
+            img_startup.load(self.resource_path('startup.png'))
             wi = int(self.width() * self.config.initial_image_width_ratio)
             img_startup = img_startup.scaled(wi, wi, transformMode=Qt.TransformationMode.SmoothTransformation)
             self.lbl_img.setPixmap(img_startup)
@@ -651,10 +738,18 @@ class MainWindow(QMainWindow):
                          QMessageBox.StandardButton.Close)
         mb.exec()
 
+    def resource_path(self, relative_path):
+        if hasattr(sys, '_MEIPASS'):
+            return os.path.join(sys._MEIPASS, relative_path)
+        return os.path.normpath(os.path.join(os.path.dirname(__file__), '..', relative_path))
+
     ##############
     # UI updates
     ##############
     def reset_ui(self):
+        self.selections = []
+        self.selection_counter = 0
+        self.hovered_selection_idx = None
         self.point_selection = None
         self.rect_selection = None
         self.rotation_quadrants = 0
@@ -775,7 +870,9 @@ class MainWindow(QMainWindow):
                                          transformMode=Qt.TransformationMode.FastTransformation)
                 # set image
                 self.lbl_img.setPixmap(qPixmap)
-                self.lbl_img.resize(int(width * scale), int(height * scale))
+                scaled_width = int(width * scale)
+                scaled_height = int(height * scale)
+                self.lbl_img.resize(scaled_width, scaled_height)
 
     def update_spectrum_plot(self):
 
@@ -784,14 +881,21 @@ class MainWindow(QMainWindow):
                              self.sb_ymin.value(),
                              self.sb_ymax.value())
 
-        if self.spectrum_y is not None:
-            # spectrum selected from cube (query)
-            self.plot.plot(self.cube.bands,
-                           self.spectrum_y,
-                           label='query',
-                           hold=False)
+        if not self.selections:
+            self.plot.reset()
+            return
 
-            # database spectra
+        # Plot all selection spectra with their colors
+        for i, sel in enumerate(self.selections):
+            self.plot.plot(self.cube.bands,
+                           sel.spectrum_y,
+                           label=sel.label,
+                           hold=(i > 0),
+                           color=sel.color_mpl,
+                           defer_draw=True)
+
+        # database spectra (compared against last selection via self.spectrum_y)
+        if self.spectrum_y is not None:
             # 0 - select
             if self.tabs_spectra_source.currentIndex() == 0:
                 # Clear cube results when in Select mode
@@ -812,7 +916,8 @@ class MainWindow(QMainWindow):
                                        reference.y,
                                        label=f"{reference.display_string()} (mean err={error:10.3E})",
                                        linewidth=1,
-                                       hold=True)
+                                       hold=True,
+                                       defer_draw=True)
             # 1 - search
             elif self.tabs_spectra_source.currentIndex() == 1:
                 # Clear previous cube search results before starting new search
@@ -845,6 +950,11 @@ class MainWindow(QMainWindow):
                 else:
                     self.cube_search_results = []
                     self._update_cube_result_tabs()
+                                       hold=True,
+                                       defer_draw=True)
+
+        # Single draw after all plot calls
+        self.plot.draw()
 
 
     ##################
@@ -939,29 +1049,91 @@ class MainWindow(QMainWindow):
             x = np.clip(event.pos().x(), 0, self.lbl_img.width()-1)
             y = np.clip(event.pos().y(), 0, self.lbl_img.height()-1)
             self.rubberband_selector.setGeometry(QRect(self.rubberband_origin, QPoint(x, y)).normalized())
+        elif event.buttons() == Qt.MouseButton.NoButton and self.cube is not None and self.selections:
+            data_pt = self.display_to_data_point(event.pos())
+            old_idx = self.hovered_selection_idx
+            self.hovered_selection_idx = self._hit_test_selection(data_pt)
+            if old_idx != self.hovered_selection_idx:
+                if self.hovered_selection_idx is not None:
+                    self.lbl_img.setCursor(Qt.CursorShape.PointingHandCursor)
+                else:
+                    self.lbl_img.setCursor(Qt.CursorShape.ArrowCursor)
+                self.update_image_label()
         else:
             event.ignore()
+    def _make_selection(self, sel_type, point, rect, spectrum_y, label):
+        """Create a Selection with the next color from the cycle."""
+        color_rgb = SELECTION_COLORS[self.selection_counter % len(SELECTION_COLORS)]
+        color_mpl = tuple(c / 255.0 for c in color_rgb)
+        sel = Selection(
+            sel_type=sel_type,
+            point=point,
+            rect=rect,
+            spectrum_y=spectrum_y,
+            color_rgb=color_rgb,
+            color_mpl=color_mpl,
+            label=label,
+            index=self.selection_counter,
+        )
+        self.selection_counter += 1
+        return sel
+
+    def _renumber_selections(self):
+        """Rebuild selection labels so numbering stays compact."""
+        for i, sel in enumerate(self.selections):
+            sel.index = i
+            if sel.sel_type == 'point' and sel.point is not None:
+                sel.label = f"P{i+1} ({sel.point.x()},{sel.point.y()})"
+            elif sel.sel_type == 'rect' and sel.rect is not None:
+                sel.label = f"R{i+1} ({sel.rect.x()},{sel.rect.y()},{sel.rect.width()}x{sel.rect.height()})"
+        self._sync_legacy_state()
+
     def handle_release_on_image(self, event):
         if self._is_viewing_hit_tab():
             event.ignore()
             return
         if event.button() == Qt.MouseButton.LeftButton:
             if self.cube is not None:
+                shift_held = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+
+                # Click on hovered selection -> remove it
+                if self.hovered_selection_idx is not None and not shift_held:
+                    self.selections.pop(self.hovered_selection_idx)
+                    self.hovered_selection_idx = None
+                    self._renumber_selections()
+                    self.set_recompute_errmap_flag()
+                    self.update_image_label()
+                    self.update_spectrum_plot()
+                    self.rubberband_selector.hide()
+                    return
+
                 rect = self.display_to_data_rect(self.rubberband_selector.geometry())
+
+                if not shift_held:
+                    self.selections.clear()
+                    self.selection_counter = 0
+
                 if rect.width() > 1 and rect.height() > 1:
                     cube_slice = self.cube.data[rect.y():rect.y()+rect.height(),
                                                 rect.x():rect.x()+rect.width(),
                                                 :]
-                    self.spectrum_y = np.mean(cube_slice, axis=(0, 1))
-                    self.rect_selection = rect
-                    self.point_selection = None
+                    spectrum_y = np.mean(cube_slice, axis=(0, 1))
+                    label = f"R{len(self.selections)+1} ({rect.x()},{rect.y()},{rect.width()}x{rect.height()})"
+                    sel = self._make_selection('rect', None, rect, spectrum_y, label)
                 else:
                     pos_img = self.display_to_data_point(event.pos())
                     if 0 <= pos_img.x() < self.cube.ncols and 0 <= pos_img.y() < self.cube.nrows:
                         print(f"Selected point: ({pos_img.x()}, {pos_img.y()})")
-                        self.spectrum_y = self.cube.data[pos_img.y(), pos_img.x(), :]
-                        self.point_selection = pos_img
-                        self.rect_selection = None
+                        spectrum_y = self.cube.data[pos_img.y(), pos_img.x(), :]
+                        label = f"P{len(self.selections)+1} ({pos_img.x()},{pos_img.y()})"
+                        sel = self._make_selection('point', pos_img, None, spectrum_y, label)
+                    else:
+                        sel = None
+
+                if sel is not None:
+                    self.selections.append(sel)
+                    self._renumber_selections()
+
                 # update ui
                 self.set_recompute_errmap_flag()
                 self.update_image_label()
@@ -970,13 +1142,83 @@ class MainWindow(QMainWindow):
         else:
             event.ignore()
 
+    def _sync_legacy_state(self):
+        """Sync scalar point_selection/rect_selection/spectrum_y from selections list."""
+        if self.selections:
+            first = self.selections[0]
+            self.spectrum_y = first.spectrum_y
+            self.point_selection = first.point if first.sel_type == 'point' else None
+            self.rect_selection = first.rect if first.sel_type == 'rect' else None
+        else:
+            self.spectrum_y = None
+            self.point_selection = None
+            self.rect_selection = None
+
+    def _hit_test_selection(self, data_point):
+        """Return index of selection under data_point, or None."""
+        for i, sel in enumerate(self.selections):
+            if sel.sel_type == 'point':
+                dx = abs(data_point.x() - sel.point.x())
+                dy = abs(data_point.y() - sel.point.y())
+                if dx <= HOVER_TOLERANCE and dy <= HOVER_TOLERANCE:
+                    return i
+            elif sel.sel_type == 'rect':
+                if sel.rect.contains(data_point):
+                    return i
+        return None
+
     def handle_rotate_left_image(self):
-        self.rotation_quadrants = (self.rotation_quadrants - 1) % 4
-        self.update_image_label()
+        self._rotate_image_with_center_preserved(-1)
 
     def handle_rotate_right_image(self):
-        self.rotation_quadrants = (self.rotation_quadrants + 1) % 4
+        self._rotate_image_with_center_preserved(1)
+
+    def _rotate_image_with_center_preserved(self, delta_quadrants):
+        center_data_point = None
+        if self.cube is not None and self.lbl_img.pixmap() is not None:
+            h_scrollbar = self.scroll_img.horizontalScrollBar()
+            v_scrollbar = self.scroll_img.verticalScrollBar()
+            viewport = self.scroll_img.viewport()
+            center_display_x = int(round(h_scrollbar.value() + viewport.width() / 2))
+            center_display_y = int(round(v_scrollbar.value() + viewport.height() / 2))
+            center_data_point = self.display_to_data_point(QPoint(center_display_x, center_display_y))
+
+        self.rotation_quadrants = (self.rotation_quadrants + delta_quadrants) % 4
         self.update_image_label()
+
+        if center_data_point is not None:
+            h_scrollbar = self.scroll_img.horizontalScrollBar()
+            v_scrollbar = self.scroll_img.verticalScrollBar()
+            viewport = self.scroll_img.viewport()
+            scale = self.sl_zoom.value() / 100
+            center_display_after = self.data_to_display_point(center_data_point)
+            center_label_x = center_display_after.x() * scale
+            center_label_y = center_display_after.y() * scale
+            h_scrollbar.setValue(max(h_scrollbar.minimum(),
+                                     min(h_scrollbar.maximum(),
+                                         int(round(center_label_x - viewport.width() / 2)))))
+            v_scrollbar.setValue(max(v_scrollbar.minimum(),
+                                     min(v_scrollbar.maximum(),
+                                         int(round(center_label_y - viewport.height() / 2)))))
+
+    def handle_clear_selections(self):
+        self.selections.clear()
+        self.selection_counter = 0
+        self.hovered_selection_idx = None
+        self._sync_legacy_state()
+        self.set_recompute_errmap_flag()
+        self.update_image_label()
+        self.update_spectrum_plot()
+
+    def handle_undo_selection(self):
+        if self.selections:
+            self.selections.pop()
+            self.hovered_selection_idx = None
+            self.selection_counter = len(self.selections)
+            self._sync_legacy_state()
+            self.set_recompute_errmap_flag()
+            self.update_image_label()
+            self.update_spectrum_plot()
 
     def handle_click_on_image_scroll(self, event):
         self.drag_start_x = event.pos().x()
@@ -1002,20 +1244,46 @@ class MainWindow(QMainWindow):
         else:
             event.ignore()
     def handle_wheel_on_image_scroll(self, event):
-        if self.scroll_img.horizontalScrollBar().maximum() > 0:
-            hs_r = self.scroll_img.horizontalScrollBar().value() / self.scroll_img.horizontalScrollBar().maximum()
-        else:
-            hs_r = 0.5
-        if self.scroll_img.verticalScrollBar().maximum() > 0:
-            vs_r = self.scroll_img.verticalScrollBar().value() / self.scroll_img.verticalScrollBar().maximum()
-        else:
-            vs_r = 0.5
+        # Calculate new zoom level
         s = event.angleDelta().y() * self.config.scroll_speed
         if s < 0:
             s = -1 / s
-        self.sl_zoom.setValue(int(self.sl_zoom.value() * s))
-        self.scroll_img.horizontalScrollBar().setValue(int(self.scroll_img.verticalScrollBar().maximum() * hs_r))
-        self.scroll_img.verticalScrollBar().setValue(int(self.scroll_img.verticalScrollBar().maximum() * vs_r))
+        new_zoom_percent = int(self.sl_zoom.value() * s)
+
+        # Clamp to valid zoom range
+        new_zoom_percent = max(self.sl_zoom.minimum(), min(self.sl_zoom.maximum(), new_zoom_percent))
+
+        # If zoom didn't change, don't process further
+        if new_zoom_percent == self.sl_zoom.value():
+            return
+
+        # Get cursor position in viewport coordinates
+        cursor_viewport_pos = event.position()
+        cursor_vp_x = cursor_viewport_pos.x()
+        cursor_vp_y = cursor_viewport_pos.y()
+
+        # Get current scroll position and zoom
+        h_scrollbar = self.scroll_img.horizontalScrollBar()
+        v_scrollbar = self.scroll_img.verticalScrollBar()
+        old_zoom = self.sl_zoom.value() / 100
+        h_pos = h_scrollbar.value()
+        v_pos = v_scrollbar.value()
+
+        # Calculate cursor position in image coordinates (accounting for current zoom/scroll)
+        cursor_img_x = (h_pos + cursor_vp_x) / old_zoom
+        cursor_img_y = (v_pos + cursor_vp_y) / old_zoom
+
+        # Apply zoom (triggers image resize via update_image_label)
+        new_zoom = new_zoom_percent / 100
+        self.sl_zoom.setValue(new_zoom_percent)
+
+        # Calculate where cursor should be in new zoomed viewport coordinates
+        new_cursor_viewport_x = cursor_img_x * new_zoom - cursor_vp_x
+        new_cursor_viewport_y = cursor_img_y * new_zoom - cursor_vp_y
+
+        # Apply scroll with bounds checking and rounding
+        h_scrollbar.setValue(max(0, min(h_scrollbar.maximum(), round(new_cursor_viewport_x))))
+        v_scrollbar.setValue(max(0, min(v_scrollbar.maximum(), round(new_cursor_viewport_y))))
 
     def handle_action_export_image(self):
         expdir = os.path.dirname(self.rawfile)
@@ -1041,35 +1309,79 @@ class MainWindow(QMainWindow):
             self.lbl_img.pixmap().save(fileName)
 
     def handle_action_export_spectrum(self):
-        if self.spectrum_y is not None:
+        if not self.selections or self.cube is None:
+            return
+
+        export_dir_default = self.last_export_dir if self.last_export_dir else (self.db.root if self.db is not None else '.')
+        export_dir = None
+        export_ext = None
+        image = np.uint8(self.rgb * (255 / self.rgb.max()))
+        image = self.draw_marker(image)
+
+        for selection in list(self.selections):
+            selection_key = self._selection_short_label(selection)
             source_name_default = self.last_source_name if self.last_source_name else self.dataset_name()
-            info_dialog = hyper.SaveSpectrumDialog(self, source_name_default)
-            if info_dialog.exec() == QDialog.DialogCode.Accepted:
-                info_dialog_result = info_dialog.get_data()
-                self.last_source_name = info_dialog_result['source']
-                metadata = hyper.Metadata(id=info_dialog_result['id'],
-                                          description=info_dialog_result['description'],
-                                          source_object=info_dialog_result['source'],
-                                          source_file=self.dataset_name(),
-                                          source_coordinates=self.selection_str(),
-                                          device_info=f"{self.cube.device} / Hyperlyse {self.config.version}",
-                                          intensity=info_dialog_result['intensity'])
-                spectrum = hyper.Spectrum(self.cube.bands, self.spectrum_y, metadata)
-                if self.last_export_dir:
-                    dir_default = self.last_export_dir
-                elif self.db is not None:
-                    dir_default = self.db.root
-                else:
-                    dir_default = '.'
-                filename_default = f"{self.dataset_name()}_{self.selection_str()}_{spectrum.metadata.id}.jdx"
-                file_spectrum, _ = QFileDialog.getSaveFileName(None, "Save spectrum", os.path.join(dir_default, filename_default),
-                                                               "JCAMP-DX (*.jdx *.dx *jcm);;Plain x,y pairs (*.dpt *.csv *.txt )")
-                if file_spectrum:
-                    img = np.uint8(self.rgb * (255 / self.rgb.max()))
-                    img = self.draw_marker(img)
-                    hyper.Database.export_spectrum(file_spectrum,
-                                                   spectrum,
-                                                   image=img)
+            header_text = f'Enter metadata for {selection_key}'
+            info_dialog = hyper.SaveSpectrumDialog(
+                self,
+                source_name_default,
+                header_text=header_text,
+                header_color=selection.color_rgb,
+            )
+            dialog_code = info_dialog.exec()
+            info_dialog_result = info_dialog.get_data()
+
+            if info_dialog_result['action'] == 'cancel' or dialog_code != QDialog.DialogCode.Accepted and info_dialog_result['action'] != 'skip':
+                break
+            if info_dialog_result['action'] == 'skip':
+                continue
+
+            self.last_source_name = info_dialog_result['source']
+            metadata = hyper.Metadata(id=info_dialog_result['id'],
+                                      description=info_dialog_result['description'],
+                                      source_object=info_dialog_result['source'],
+                                      source_file=self.dataset_name(),
+                                      source_coordinates=self.selection_str(selection),
+                                      device_info=f"{self.cube.device} / Hyperlyse {self.config.version}",
+                                      intensity=info_dialog_result['intensity'])
+            spectrum = hyper.Spectrum(self.cube.bands, selection.spectrum_y, metadata)
+
+            if export_dir is None:
+                filename_default = self._selection_export_filename(selection, spectrum.metadata.id, '.jdx')
+                file_spectrum, _ = QFileDialog.getSaveFileName(
+                    None,
+                    'Save spectrum',
+                    os.path.join(export_dir_default, filename_default),
+                    'JCAMP-DX (*.jdx *.dx *jcm);;Plain x,y pairs (*.dpt *.csv *.txt )',
+                )
+                if not file_spectrum:
+                    break
+                export_dir = os.path.dirname(file_spectrum)
+                export_ext = os.path.splitext(file_spectrum)[1] or '.jdx'
+                self.last_export_dir = export_dir
+            else:
+                export_base = self._selection_export_stem(selection, spectrum.metadata.id)
+                file_spectrum = os.path.join(export_dir, f'{export_base}{export_ext}')
+
+            if not os.path.splitext(file_spectrum)[1]:
+                file_spectrum = f'{file_spectrum}.jdx'
+
+            hyper.Database.export_spectrum(
+                file_spectrum,
+                spectrum,
+                image=image,
+            )
+
+    def _selection_short_label(self, selection):
+        if selection is None or not selection.label:
+            return ''
+        return selection.label.split(' ', 1)[0]
+
+    def _selection_export_stem(self, selection, spectrum_id):
+        return f'{spectrum_id}_{self.selection_str(selection)}_{self.dataset_name()}'
+
+    def _selection_export_filename(self, selection, spectrum_id, extension):
+        return f'{self._selection_export_stem(selection, spectrum_id)}{extension}'
 
 
     def handle_action_open_preferences(self):
@@ -1443,8 +1755,9 @@ class MainWindow(QMainWindow):
         if self.cube is None:
             return self.m2i(point)
 
-        x_disp = self.m2i(point.x())
-        y_disp = self.m2i(point.y())
+        point_on_pixmap = self.label_to_pixmap_point(point)
+        x_disp = self.m2i(point_on_pixmap.x())
+        y_disp = self.m2i(point_on_pixmap.y())
 
         width = self.cube.ncols
         height = self.cube.nrows
@@ -1479,6 +1792,39 @@ class MainWindow(QMainWindow):
         p2 = self.display_to_data_point(rect.bottomRight())
         return QRect(p1, p2).normalized()
 
+    def label_to_pixmap_point(self, point):
+        pixmap = self.lbl_img.pixmap()
+        if pixmap is None:
+            return point
+
+        x_offset = max((self.lbl_img.width() - pixmap.width()) // 2, 0)
+        y_offset = max((self.lbl_img.height() - pixmap.height()) // 2, 0)
+        return QPoint(point.x() - x_offset, point.y() - y_offset)
+
+    def data_to_display_point(self, point):
+        if self.cube is None:
+            return point
+
+        x_data = point.x()
+        y_data = point.y()
+        width = self.cube.ncols
+        height = self.cube.nrows
+
+        if self.rotation_quadrants == 0:
+            x_disp = x_data
+            y_disp = y_data
+        elif self.rotation_quadrants == 1:
+            x_disp = height - 1 - y_data
+            y_disp = x_data
+        elif self.rotation_quadrants == 2:
+            x_disp = width - 1 - x_data
+            y_disp = height - 1 - y_data
+        else:
+            x_disp = y_data
+            y_disp = width - 1 - x_data
+
+        return QPoint(x_disp, y_disp)
+
     def m2i(self, object):
         # convert mouse coordinates on scaled image label to image coordinates
         if isinstance(object, numbers.Number):
@@ -1494,11 +1840,13 @@ class MainWindow(QMainWindow):
 
     def draw_marker(self, img):
         """
-        Draws a cross (if a point is selected) or a rectangle (if an area is selected) onto an image
+        Draws crosses (for point selections) or rectangles (for area selections) onto an image.
         :param img: numpy array, r*c or r*c*3
-        :param fatten: make the marker fatter for small scales, such that it remais visible
-        :return:
+        :return: image with markers drawn
         """
+        if not self.selections:
+            return img
+
         if len(img.shape) == 2:
             img = np.dstack([img, img, img])
         img_marker = img.copy()
@@ -1511,53 +1859,59 @@ class MainWindow(QMainWindow):
             padding = 0
             cross_size = self.config.cross_size
 
-        if self.rect_selection is not None:
-            # RECT
-            r = self.rect_selection
-            # top line
-            img_marker[max(r.top() - padding, 0):min(r.top() + padding + 1, self.cube.nrows - 1),
-                       max(r.left(), 0):min(r.right(), self.cube.ncols - 1)] = self.config.marker_colors[0]
-            # bottom line
-            img_marker[max(r.bottom() - padding, 0):min(r.bottom() + padding + 1, self.cube.nrows - 1),
-                       max(r.left(), 0):min(r.right(), self.cube.ncols - 1)] = self.config.marker_colors[1]
-            # left line
-            img_marker[max(r.top(), 0):min(r.bottom()+1, self.cube.nrows - 1),
-                       max(r.left() - padding, 0):min(r.left() + padding + 1, self.cube.ncols - 1)] = self.config.marker_colors[0]
-            # left line
-            img_marker[max(r.top(), 0):min(r.bottom()+1, self.cube.nrows - 1),
-            max(r.right() - padding, 0):min(r.right() + padding + 1, self.cube.ncols - 1)] = self.config.marker_colors[1]
-        elif self.point_selection is not None:
-            # CROSS
-            p = self.point_selection
-            # horizontal line
-            img_marker[max(p.y() - padding, 0):min(p.y() + padding + 1, self.cube.nrows - 1),
-                      max(p.x() - cross_size, 0):min(p.x() + cross_size + 1, self.cube.ncols - 1)] = self.config.marker_colors[0]
-            # vertical line
-            img_marker[max(p.y() - cross_size, 0):min(p.y() + cross_size + 1, self.cube.nrows - 1),
-                      max(p.x() - padding, 0):min(p.x() + padding + 1, self.cube.ncols - 1)] = self.config.marker_colors[1]
-            # central dot
-            img_marker[max(p.y() - padding, 0):min(p.y() + padding + 1, self.cube.nrows - 1),
-                      max(p.x() - padding, 0):min(p.x() + padding + 1, self.cube.ncols - 1)] = self.config.marker_colors[2]
+        hover_color = [255, 255, 255]
 
-        else:
-            #nothing
-            return img
+        for i, sel in enumerate(self.selections):
+            color = hover_color if i == self.hovered_selection_idx else sel.color_rgb
+
+            if sel.sel_type == 'rect':
+                r = sel.rect
+                # top line
+                img_marker[max(r.top() - padding, 0):min(r.top() + padding + 1, self.cube.nrows - 1),
+                           max(r.left(), 0):min(r.right(), self.cube.ncols - 1)] = color
+                # bottom line
+                img_marker[max(r.bottom() - padding, 0):min(r.bottom() + padding + 1, self.cube.nrows - 1),
+                           max(r.left(), 0):min(r.right(), self.cube.ncols - 1)] = color
+                # left line
+                img_marker[max(r.top(), 0):min(r.bottom()+1, self.cube.nrows - 1),
+                           max(r.left() - padding, 0):min(r.left() + padding + 1, self.cube.ncols - 1)] = color
+                # right line
+                img_marker[max(r.top(), 0):min(r.bottom()+1, self.cube.nrows - 1),
+                           max(r.right() - padding, 0):min(r.right() + padding + 1, self.cube.ncols - 1)] = color
+
+            elif sel.sel_type == 'point':
+                p = sel.point
+                # horizontal line
+                img_marker[max(p.y() - padding, 0):min(p.y() + padding + 1, self.cube.nrows - 1),
+                          max(p.x() - cross_size, 0):min(p.x() + cross_size + 1, self.cube.ncols - 1)] = color
+                # vertical line
+                img_marker[max(p.y() - cross_size, 0):min(p.y() + cross_size + 1, self.cube.nrows - 1),
+                          max(p.x() - padding, 0):min(p.x() + padding + 1, self.cube.ncols - 1)] = color
+                # central dot
+                img_marker[max(p.y() - padding, 0):min(p.y() + padding + 1, self.cube.nrows - 1),
+                          max(p.x() - padding, 0):min(p.x() + padding + 1, self.cube.ncols - 1)] = [255, 255, 255]
 
         img = img * (1 - self.config.marker_alpha) + img_marker * self.config.marker_alpha
         return img.astype(np.uint8)
 
-    def selection_coords(self):
-        if self.rect_selection is not None:
-            r = self.rect_selection
+    def selection_coords(self, selection=None):
+        if selection is None:
+            if not self.selections:
+                return []
+            selection = self.selections[-1]
+        if selection is None:
+            return []
+        if selection.sel_type == 'rect':
+            r = selection.rect
             return [r.left(), r.top(), r.width(), r.height()]
-        elif self.point_selection is not None:
-            p = self.point_selection
+        elif selection.sel_type == 'point':
+            p = selection.point
             return [p.x(), p.y()]
         else:
-            return []  # can that happen?
+            return []
 
-    def selection_str(self):
-        return f'({",".join([str(c) for c in self.selection_coords()])})'
+    def selection_str(self, selection=None):
+        return f'({",".join([str(c) for c in self.selection_coords(selection)])})'
 
     def get_lambda_slider_text(self, layer_idx):
         return '%.1fnm' % self.cube.bands[layer_idx]

@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import QApplication
 
 
 # config
-__version__ = "1.3.3"
+__version__ = "1.4.0"
 # Handle path for both development and PyInstaller bundled exe
 if hasattr(sys, '_MEIPASS'):
     config_path = os.path.join(sys._MEIPASS, 'config.json')
