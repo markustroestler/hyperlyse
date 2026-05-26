@@ -1,0 +1,22 @@
+BUGS
+====
+
+1. Overlap check uses AND instead of OR
+   File: src/hyperlyse/database.py
+   Location: Database.compare_spectra (and compare_spectra_old)
+   Code: if y1_masked_size < 2 > y2_masked_size:
+
+   Python chained comparison "a < b > c" means "a < b AND b > c",
+   so this returns None only when BOTH masked arrays have < 2 elements.
+
+   If only one side has 0 points the function proceeds and produces
+   nan or a shape-mismatch crash instead of returning None.
+
+   Fix: change to
+       if y1_masked_size < 2 or y2_masked_size < 2:
+
+   This should be done as a separate bugfix commit with dedicated tests,
+   not mixed into the spectrum_to_vector refactor.
+
+   Severity: low (requires near-zero wavelength overlap on exactly one side)
+   Found during: structural analysis of spectrum_to_vector refactor

@@ -165,6 +165,12 @@ class Spectrum:
 
 
 
+# Backward compatibility: spectrum_to_vector moved to feature_extractor.py
+from hyperlyse.feature_extractor import spectrum_to_vector  # noqa: F401
+from hyperlyse.feature_extractor import FeatureExtractor
+from hyperlyse.vector_store import VectorStore
+
+
 class Database:
 
     def __init__(self, root=''):
@@ -172,11 +178,16 @@ class Database:
         #self.data = None
         #self.file_data = None
         self.spectra = []
+        self._extractor = FeatureExtractor()
+        cache_dir = os.path.join(root, '.hyperlyse_cache') if root else None
+        self._store = VectorStore(cache_dir)
         self.refresh_from_disk()
 
     def refresh_from_disk(self, new_root=''):
         if new_root:
             self.root = new_root
+            cache_dir = os.path.join(new_root, '.hyperlyse_cache')
+            self._store = VectorStore(cache_dir)
         if self.root:
             self.spectra = []
             for root, dirs, files in os.walk(self.root):
@@ -192,6 +203,78 @@ class Database:
 
     @staticmethod
     def compare_spectra(x1, y1,
+                        x2, y2,
+                        custom_range=None,
+                        use_gradient=False,
+                        squared_errs=True):
+        """
+        compares 2 spectra
+        :param x1: np.array, wavelength array of spectrum 1
+        :param y1: np.array, intensity array of spectrum 1 - can be 1d (simple spectrum) or 3d (cube)
+        :param x2: np.array, wavelength array of spectrum 2
+        :param y2: np.array, intensity array of spectrum 2 - must be 1d, is re-sampled if required
+        :param custom_range: (x_min, x_max), a custom range of wavelengths used for comparison
+        :param use_gradient: compare gradients instead of absolute differences
+        :param squared_errs: use squared differences (or absolute differences)
+        :return: mean error/distance; scalar or 2d np.array, depending on shape of y1
+        """
+        x1 = np.array(x1)
+        x2 = np.array(x2)
+        y1 = np.array(y1)
+        y2 = np.array(y2)
+
+        is_cube = len(y1.shape) == 3
+
+        # Compute effective overlapping wavelength range
+        lambda_min = max(x1[0], x2[0])
+        lambda_max = min(x1[-1], x2[-1])
+        if custom_range is not None:
+            lambda_min = max(lambda_min, custom_range[0])
+            lambda_max = min(lambda_max, custom_range[1])
+
+        # Check for sufficient overlap
+        mask1 = np.logical_and(x1 >= lambda_min, x1 <= lambda_max)
+        mask2 = np.logical_and(x2 >= lambda_min, x2 <= lambda_max)
+
+        if is_cube:
+            y1_masked_size = y1[:, :, mask1].size
+        else:
+            y1_masked_size = y1[mask1].size
+        y2_masked_size = y2[mask2].size
+
+        if y1_masked_size < 2 > y2_masked_size:
+            print('WARNING: compared spectra do not have sufficient overlap. Returning None')
+            return None
+
+        # Resample y2 to match y1's wavelength grid if they differ
+        if not np.array_equal(x1[mask1], x2[mask2]):
+            y2 = resample(y2[mask2], mask1.sum())
+            x2 = x1[mask1]
+
+        # Prepare comparison vectors
+        # INVARIANT: effective_range must match the (lambda_min, lambda_max) used
+        # for mask1/mask2 above. spectrum_to_vector will recompute a mask from this
+        # range — for v1 it replicates mask1 exactly, and for v2 (after resample)
+        # it is an identity no-op since x2 already equals x1[mask1].
+        effective_range = (lambda_min, lambda_max)
+        _extractor = FeatureExtractor()
+        v1 = _extractor.extract(x1, y1, effective_range, use_gradient)
+        v2 = _extractor.extract(x2, y2, effective_range, use_gradient)
+
+        errs = v1 - v2
+
+        if squared_errs:
+            errs = np.power(errs, 2)
+        else:
+            errs = np.abs(errs)
+
+        if is_cube:
+            return np.mean(errs, axis=2)
+        else:
+            return np.mean(errs)
+
+    @staticmethod
+    def compare_spectra_old(x1, y1,
                         x2, y2,
                         custom_range=None,
                         use_gradient=False,
@@ -253,25 +336,79 @@ class Database:
             return np.mean(errs, axis=2)
         else:
             return np.mean(errs)
-
+    
     def search_spectrum(self,
                         x_query,
                         y_query,
                         custom_range=None,
                         use_gradient=False,
                         squared_errs=True):
+        x_query = np.array(x_query)
+        y_query = np.array(y_query)
+        is_cube = len(y_query.shape) == 3
+
         results = []
+        v1_memo = {}  # effective_range -> v1 array (per-call memoization)
+
         for db_spectrum in self.spectra:
-            error = Database.compare_spectra(x_query,
-                                             y_query,
-                                             db_spectrum.x,
-                                             db_spectrum.y,
-                                             custom_range=custom_range,
-                                             use_gradient=use_gradient,
-                                             squared_errs=squared_errs)
-            if error is not None:
-                results.append({'error': error,
-                                'spectrum': db_spectrum})
+            x2 = np.array(db_spectrum.x)
+            y2 = np.array(db_spectrum.y)
+
+            # --- Overlap (same math as compare_spectra) ---
+            lambda_min = max(x_query[0], x2[0])
+            lambda_max = min(x_query[-1], x2[-1])
+            if custom_range is not None:
+                lambda_min = max(lambda_min, custom_range[0])
+                lambda_max = min(lambda_max, custom_range[1])
+
+            mask1 = np.logical_and(x_query >= lambda_min, x_query <= lambda_max)
+            mask2 = np.logical_and(x2 >= lambda_min, x2 <= lambda_max)
+
+            # --- Overlap check (same as compare_spectra) ---
+            if is_cube:
+                y1_masked_size = y_query[:, :, mask1].size
+            else:
+                y1_masked_size = y_query[mask1].size
+            y2_masked_size = y2[mask2].size
+
+            if y1_masked_size < 2 > y2_masked_size:
+                continue
+
+            effective_range = (lambda_min, lambda_max)
+
+            # --- v1: memoize by effective_range within this call ---
+            if effective_range not in v1_memo:
+                v1_memo[effective_range] = self._extractor.extract(
+                    x_query, y_query, effective_range, use_gradient)
+            v1 = v1_memo[effective_range]
+
+            # --- v2: check VectorStore (persists across calls) ---
+            v2_key = self._store.make_db_vector_key(
+                x_query, x2, y2, custom_range, use_gradient)
+            v2 = self._store.get(v2_key)
+
+            if v2 is None:
+                # Resample + extract (same math as compare_spectra)
+                if not np.array_equal(x_query[mask1], x2[mask2]):
+                    y2 = resample(y2[mask2], mask1.sum())
+                    x2 = x_query[mask1]
+                v2 = self._extractor.extract(x2, y2, effective_range, use_gradient)
+                self._store.put(v2_key, v2)
+
+            # --- Distance (same math as compare_spectra) ---
+            errs = v1 - v2
+            if squared_errs:
+                errs = np.power(errs, 2)
+            else:
+                errs = np.abs(errs)
+
+            if is_cube:
+                error = np.mean(errs, axis=2)
+            else:
+                error = np.mean(errs)
+
+            results.append({'error': error, 'spectrum': db_spectrum})
+
         results.sort(key=lambda v: v['error'])
         return results
 
