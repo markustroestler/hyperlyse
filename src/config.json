@@ -1,5 +1,5 @@
 {
-  "DEFAULT_DB_PATH": "C:/Users/TRM4WI/Documents/repos/hyperlyse/src/db",
+  "DEFAULT_DB_PATH": "C:/Users/markus/Documents/repos/hyperlyse",
   "SCROLL_SPEED": 0.01,
   "CROSS_SIZE": 10,
   "MARKER_COLORS": [
@@ -20,10 +20,11 @@
     ]
   ],
   "MARKER_ALPHA": 0.5,
-  "CUBE_FOLDER_PATH": "C:/Users/TRM4WI/Documents/repos/hyperlyse/src/cubes",
+  "CUBE_FOLDER_PATH": "C:/Users/markus/Documents/repos/hyperlyse/data",
   "SAMPLE_RATE": 1,
   "SEARCH_IN_DB": false,
   "SEARCH_IN_CUBES": true,
-  "NUM_HITS": 10,
+  "SEARCH_IN_SAME_CUBE": false,
+  "NUM_HITS": 5,
   "USE_PCA": false
 }

@@ -1,4 +1,6 @@
 import os
+import gc
+import stat
 import json
 import time
 import shutil
@@ -15,6 +17,10 @@ from hyperlyse.database import spectrum_to_vector
 PIPELINE_VERSION = "2"
 CUBE_DATA_EXTENSIONS = {'.raw', '.dat', '.bil'}
 REFERENCE_PREFIXES = ('DARKREF_', 'WHITEREF_')
+REFLECTANCE_PREFIX = 'REFLECTANCE_'
+# Specim IQ stores the raw cube and the calibrated reflectance product in
+# sibling subfolders of a capture; collapse them so a scene loads only once.
+SCENE_SUBFOLDERS = ('capture', 'results')
 
 
 def discover_cubes(folder, include_subfolders=False):
@@ -23,6 +29,11 @@ def discover_cubes(folder, include_subfolders=False):
 
     Returns a sorted list of absolute file paths. Excludes .hdr files,
     dark/white reference files, and files in .hyperlyse_cache.
+
+    When both a calibrated reflectance product (REFLECTANCE_<id>) and the raw
+    capture (<id>) exist for the same scene, only the reflectance file is
+    returned — it is already calibrated by Specim IQ Studio, so the raw is
+    redundant. The raw is used only when no reflectance product exists.
     """
     results = []
     if not folder or not os.path.isdir(folder):
@@ -41,8 +52,61 @@ def discover_cubes(folder, include_subfolders=False):
             if os.path.isfile(full) and _is_cube_file(f):
                 results.append(full)
 
+    results = _prefer_reflectance(results)
     results.sort()
     return results
+
+
+def _is_reflectance_file(filename):
+    """Check if a filename is a calibrated reflectance product."""
+    return os.path.basename(filename).startswith(REFLECTANCE_PREFIX)
+
+
+def _scene_key(filepath):
+    """
+    Compute a grouping key that pairs the raw capture and its reflectance
+    product. The capture id is the basename without extension and without a
+    leading REFLECTANCE_ prefix; the scene root is the parent of a
+    capture/results subfolder when present, otherwise the file's own folder.
+    """
+    directory = os.path.dirname(filepath)
+    capture_id, _ = os.path.splitext(os.path.basename(filepath))
+    if capture_id.startswith(REFLECTANCE_PREFIX):
+        capture_id = capture_id[len(REFLECTANCE_PREFIX):]
+    if os.path.basename(directory).lower() in SCENE_SUBFOLDERS:
+        scene_root = os.path.dirname(directory)
+    else:
+        scene_root = directory
+    return (scene_root, capture_id)
+
+
+def _prefer_reflectance(filepaths):
+    """
+    Collapse raw/reflectance variants of the same scene to a single file,
+    preferring the reflectance product when one exists.
+    """
+    scenes = {}
+    for path in filepaths:
+        scenes.setdefault(_scene_key(path), []).append(path)
+
+    chosen = []
+    for variants in scenes.values():
+        reflectance = [p for p in variants if _is_reflectance_file(p)]
+        chosen.extend(reflectance if reflectance else variants)
+    return chosen
+
+
+def _scene_key_normalized(filepath):
+    """
+    Scene key with a normalized (absolute, case-folded) scene root, suitable for
+    comparing two paths that may use different separators or refer to the raw
+    capture vs the reflectance product of the same scene. Returns None for an
+    empty path.
+    """
+    if not filepath:
+        return None
+    scene_root, capture_id = _scene_key(filepath)
+    return (os.path.normcase(os.path.abspath(scene_root)), capture_id)
 
 
 def _is_cube_file(filename):
@@ -120,8 +184,7 @@ def analyze_cube(cube_filepath, cube_folder, sample_rate=1, cube_class=None):
     cache_dir = _cache_dir_for_cube(cube_folder, cube_filepath)
 
     # Clean up any partial cache
-    if os.path.isdir(cache_dir):
-        shutil.rmtree(cache_dir)
+    _robust_rmtree(cache_dir)
     os.makedirs(cache_dir, exist_ok=True)
 
     # Write initial metadata with status "analyzing"
@@ -213,7 +276,8 @@ def analyze_cube(cube_filepath, cube_folder, sample_rate=1, cube_class=None):
 
 
 def analyze_cubes(cube_folder, sample_rate=1, include_subfolders=False,
-                  cube_class=None, progress_callback=None):
+                  cube_class=None, progress_callback=None,
+                  discovered_callback=None):
     """
     Discover and analyze all cubes in a folder.
 
@@ -222,9 +286,13 @@ def analyze_cubes(cube_folder, sample_rate=1, include_subfolders=False,
     :param include_subfolders: Whether to recurse into subdirectories.
     :param cube_class: The Cube class (for testing).
     :param progress_callback: Optional callable(current_index, total, cube_name, elapsed_per_cube).
+    :param discovered_callback: Optional callable(total) invoked right after
+        discovery, before any analysis begins.
     :return: List of (cube_filepath, cache_dir) tuples for analyzed/cached cubes.
     """
     cube_files = discover_cubes(cube_folder, include_subfolders)
+    if discovered_callback:
+        discovered_callback(len(cube_files))
     results = []
     elapsed_times = []
 
@@ -259,7 +327,7 @@ def search_in_cached_cubes(cube_folder, x_query, y_query,
                            sample_rate=1, include_subfolders=False,
                            custom_range=None, use_gradient=False,
                            squared_errs=True, num_hits=3,
-                           use_pca=False,
+                           use_pca=False, exclude_cube_file=None,
                            progress_callback=None):
     """
     Search across all cached cubes for spectra similar to the query.
@@ -275,6 +343,9 @@ def search_in_cached_cubes(cube_folder, x_query, y_query,
     :param num_hits: Number of top hits to return.
     :param use_pca: Use PCA+BallTree for fast approximate search (falls back to
         brute-force if PCA artifacts are missing).
+    :param exclude_cube_file: Optional cube file path to exclude from the search
+        (e.g. the cube currently open in the UI). Matched by scene, so the raw
+        capture and its reflectance product are treated as the same cube.
     :param progress_callback: Optional callable(current, total, cube_name, avg_time).
     :return: List of hit dicts sorted by error, up to num_hits entries.
     """
@@ -288,11 +359,21 @@ def search_in_cached_cubes(cube_folder, x_query, y_query,
     all_hits = []
 
     cube_files = discover_cubes(cube_folder, include_subfolders)
+    exclude_key = _scene_key_normalized(exclude_cube_file)
     total = len(cube_files)
     t_start = time.time()
 
     for i, cube_filepath in enumerate(cube_files):
         cube_name = os.path.splitext(os.path.basename(cube_filepath))[0]
+
+        # Skip the excluded scene. Comparison is by scene key (not exact path) so
+        # opening the raw capture still excludes its reflectance product, which is
+        # what discover_cubes actually returns for the scene.
+        if exclude_key is not None and _scene_key_normalized(cube_filepath) == exclude_key:
+            if progress_callback is not None:
+                avg_time = (time.time() - t_start) / (i + 1) if i > 0 else 0
+                progress_callback(i, total, cube_name, avg_time)
+            continue
         avg_time = (time.time() - t_start) / (i + 1) if i > 0 else 0
         if progress_callback is not None:
             progress_callback(i, total, cube_name, avg_time)
@@ -425,8 +506,10 @@ def search_in_cached_cubes(cube_folder, x_query, y_query,
             # Map back to original cube coordinates
             orig_x = int(sx * sr)
             orig_y = int(sy * sr)
-            # Get the spectrum at this location from the cached data
-            hit_spectrum = spectra[sy, sx, :]
+            # Get the spectrum at this location from the cached data.
+            # Copy out of the mmap so the hit doesn't keep the file handle
+            # open (Windows can't delete a memory-mapped file).
+            hit_spectrum = np.array(spectra[sy, sx, :])
 
             all_hits.append({
                 'error': float(error_val),
@@ -459,11 +542,50 @@ def get_cached_cube_dirs(cube_folder, include_subfolders=False, sample_rate=1):
     return result
 
 
+def _robust_rmtree(path, retries=5, delay=0.2):
+    """
+    Delete a directory tree, tolerating transient Windows file locks.
+
+    numpy memory-maps (np.load(..., mmap_mode='r')) keep an OS handle on the
+    backing .npy file until the array is garbage-collected; on Windows an open
+    handle blocks deletion with WinError 32. We force a collection first, then
+    retry rmtree, clearing read-only flags on any file that resists.
+    """
+    if not os.path.isdir(path):
+        return
+
+    # Release any lingering memmap handles before we start deleting.
+    gc.collect()
+
+    def on_error(func, target, exc_info):
+        # Clear a possible read-only attribute and retry once inline.
+        try:
+            os.chmod(target, stat.S_IWRITE)
+            func(target)
+        except OSError:
+            raise
+
+    last_exc = None
+    for attempt in range(retries):
+        try:
+            shutil.rmtree(path, onerror=on_error)
+            return
+        except OSError as e:
+            last_exc = e
+            gc.collect()
+            time.sleep(delay)
+
+    # Final attempt; let the exception propagate if it still fails.
+    if os.path.isdir(path):
+        shutil.rmtree(path, onerror=on_error)
+    if last_exc is not None and os.path.isdir(path):
+        raise last_exc
+
+
 def reset_cache(cube_folder):
     """Delete all cached cube analysis data."""
     cache_dir = os.path.join(cube_folder, '.hyperlyse_cache', 'cube_vectors')
-    if os.path.isdir(cache_dir):
-        shutil.rmtree(cache_dir)
+    _robust_rmtree(cache_dir)
 
 
 def load_rgb_preview(cache_dir):

@@ -203,6 +203,13 @@ class SettingsDialog(QDialog):
         self.chk_search_cubes.setChecked(config.search_in_cubes)
         layout.addRow('', self.chk_search_cubes)
 
+        self.chk_search_same_cube = QCheckBox('Include the currently open cube')
+        self.chk_search_same_cube.setChecked(config.search_in_same_cube)
+        self.chk_search_same_cube.setToolTip(
+            'When disabled, the cube currently open is skipped during the\n'
+            'analyzed-cube search, so hits only come from other cubes.')
+        layout.addRow('', self.chk_search_same_cube)
+
         self.chk_use_pca = QCheckBox('Use fast approximate search (PCA + BallTree)')
         self.chk_use_pca.setChecked(config.use_pca)
         self.chk_use_pca.setToolTip(
@@ -239,5 +246,6 @@ class SettingsDialog(QDialog):
             'num_hits': self.cb_num_hits.currentData(),
             'search_in_db': self.chk_search_db.isChecked(),
             'search_in_cubes': self.chk_search_cubes.isChecked(),
+            'search_in_same_cube': self.chk_search_same_cube.isChecked(),
             'use_pca': self.chk_use_pca.isChecked(),
         }

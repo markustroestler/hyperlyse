@@ -1,4 +1,5 @@
 import os
+import gc
 import sys
 import traceback
 import numpy as np
@@ -48,6 +49,7 @@ hyper_quotes = ['"Hyper, hyper. We need the bass drum." - H.P. Baxxter',
 
 class CubeAnalysisWorker(QThread):
     """Background worker for analyzing cubes."""
+    discovered = pyqtSignal(int)  # total cube count (after discovery)
     progress = pyqtSignal(int, int, str, float, bool)  # current, total, name, avg_time, skipped
     finished = pyqtSignal(int, int)  # analyzed_count, skipped_count
     error = pyqtSignal(str)
@@ -73,7 +75,8 @@ class CubeAnalysisWorker(QThread):
                 self.cube_folder,
                 sample_rate=self.sample_rate,
                 include_subfolders=self.include_subfolders,
-                progress_callback=on_progress)
+                progress_callback=on_progress,
+                discovered_callback=self.discovered.emit)
             self.finished.emit(self._analyzed, self._skipped)
         except Exception as e:
             self.error.emit(traceback.format_exc())
@@ -87,7 +90,7 @@ class CubeSearchWorker(QThread):
 
     def __init__(self, cube_folder, x_query, y_query, sample_rate,
                  include_subfolders, custom_range, use_gradient,
-                 squared_errs, num_hits, use_pca=False):
+                 squared_errs, num_hits, use_pca=False, exclude_cube_file=None):
         super().__init__()
         self.cube_folder = cube_folder
         self.x_query = x_query
@@ -99,6 +102,7 @@ class CubeSearchWorker(QThread):
         self.squared_errs = squared_errs
         self.num_hits = num_hits
         self.use_pca = use_pca
+        self.exclude_cube_file = exclude_cube_file
 
     def run(self):
         try:
@@ -116,6 +120,7 @@ class CubeSearchWorker(QThread):
                 squared_errs=self.squared_errs,
                 num_hits=self.num_hits,
                 use_pca=self.use_pca,
+                exclude_cube_file=self.exclude_cube_file,
                 progress_callback=on_progress)
             self.finished.emit(results)
         except Exception as e:
@@ -583,6 +588,10 @@ class MainWindow(QMainWindow):
         self.rs_xrange.endValueChanged.connect(self.set_recompute_errmap_flag)
         self.rs_xrange.startValueChanged.connect(self.set_recompute_pca_flag)
         self.rs_xrange.endValueChanged.connect(self.set_recompute_pca_flag)
+        # Re-render the image AFTER the recompute flags are set, so the
+        # similarity/PCA view refreshes immediately on a range change.
+        self.rs_xrange.startValueChanged.connect(self.update_image_label)
+        self.rs_xrange.endValueChanged.connect(self.update_image_label)
 
         layout_compare_ctrl.addWidget(self.rs_xrange)
 
@@ -591,6 +600,7 @@ class MainWindow(QMainWindow):
         self.cb_squared.setChecked(True)
         self.cb_squared.stateChanged.connect(self.update_spectrum_plot)
         self.cb_squared.stateChanged.connect(self.set_recompute_errmap_flag)
+        self.cb_squared.stateChanged.connect(self.update_image_label)
         layout_compare_ctrl.addWidget(self.cb_squared)
 
         self.cb_gradient = QCheckBox(self)
@@ -598,6 +608,7 @@ class MainWindow(QMainWindow):
         self.cb_gradient.setChecked(True)
         self.cb_gradient.stateChanged.connect(self.update_spectrum_plot)
         self.cb_gradient.stateChanged.connect(self.set_recompute_errmap_flag)
+        self.cb_gradient.stateChanged.connect(self.update_image_label)
         layout_compare_ctrl.addWidget(self.cb_gradient)
 
         # comparison spectra source
@@ -1426,6 +1437,8 @@ class MainWindow(QMainWindow):
             self.action_search_in_cubes.setChecked(data['search_in_cubes'])
             self.action_search_in_cubes.blockSignals(False)
 
+            self.config.search_in_same_cube = data['search_in_same_cube']
+
             self.config.use_pca = data.get('use_pca', False)
 
             self.config.save()
@@ -1449,33 +1462,42 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, 'Analyze cubes', 'No cube folder is set.')
             return
 
-        # Discover cubes first to know the total
-        cube_files = cube_analyzer.discover_cubes(
-            self.config.cube_folder_path, self.config.include_subfolders)
-        if not cube_files:
-            QMessageBox.information(self, 'Analyze cubes',
-                                   'No cube files found in the selected folder.')
-            return
-
-        # Create progress dialog
+        # Show the progress dialog immediately. Discovery (which can take a few
+        # seconds) runs in the worker thread; the range starts indeterminate
+        # (0, 0) and is set once the worker reports the discovered count.
         self._analysis_progress = QProgressDialog(
-            'Preparing analysis...', 'Cancel', 0, len(cube_files), self)
+            'Discovering cubes...', 'Cancel', 0, 0, self)
         self._analysis_progress.setWindowTitle('Analyzing Cubes')
         self._analysis_progress.setMinimumDuration(0)
         self._analysis_progress.setAutoClose(False)
         self._analysis_progress.setAutoReset(False)
         self._analysis_progress.setWindowModality(Qt.WindowModality.WindowModal)
+        self._analysis_progress.setValue(0)
 
         # Create and start worker
         self._analysis_worker = CubeAnalysisWorker(
             self.config.cube_folder_path,
             self.config.sample_rate,
             self.config.include_subfolders)
+        self._analysis_worker.discovered.connect(self._on_analysis_discovered)
         self._analysis_worker.progress.connect(self._on_analysis_progress)
         self._analysis_worker.finished.connect(self._on_analysis_finished)
         self._analysis_worker.error.connect(self._on_analysis_error)
         self._analysis_progress.canceled.connect(self._analysis_worker.terminate)
         self._analysis_worker.start()
+
+    def _on_analysis_discovered(self, total):
+        dlg = getattr(self, '_analysis_progress', None)
+        if dlg is None:
+            return
+        if total == 0:
+            dlg.close()
+            self._analysis_progress = None
+            QMessageBox.information(self, 'Analyze cubes',
+                                   'No cube files found in the selected folder.')
+            return
+        dlg.setMaximum(total)
+        dlg.setLabelText('Preparing analysis...')
 
     def _on_analysis_progress(self, current, total, name, avg_time, skipped):
         dlg = getattr(self, '_analysis_progress', None)
@@ -1520,6 +1542,13 @@ class MainWindow(QMainWindow):
             self._search_worker.wait()
             self._search_worker = None
 
+        # Close any leftover progress dialog before creating a new one,
+        # otherwise the old one is orphaned on screen.
+        old_dlg = getattr(self, '_search_progress', None)
+        if old_dlg is not None:
+            old_dlg.close()
+            self._search_progress = None
+
         self._search_progress = QProgressDialog(
             'Searching cached cubes...', 'Cancel', 0, 0, self)
         self._search_progress.setWindowTitle('Searching Cubes')
@@ -1538,7 +1567,9 @@ class MainWindow(QMainWindow):
             use_gradient=self.cb_gradient.isChecked(),
             squared_errs=self.cb_squared.isChecked(),
             num_hits=self.config.num_hits,
-            use_pca=self.config.use_pca)
+            use_pca=self.config.use_pca,
+            exclude_cube_file=None if self.config.search_in_same_cube
+                               else getattr(self, 'rawfile', None))
         self._search_worker.progress.connect(self._on_search_progress)
         self._search_worker.finished.connect(self._on_search_finished)
         self._search_worker.error.connect(self._on_search_error)
@@ -1616,10 +1647,20 @@ class MainWindow(QMainWindow):
                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                                      QMessageBox.StandardButton.No)
         if reply == QMessageBox.StandardButton.Yes:
-            cube_analyzer.reset_cache(self.config.cube_folder_path)
+            # Drop any search results first: hits may hold numpy memmap views
+            # into the cached .npy files, and on Windows an open mmap handle
+            # blocks deletion of the file it maps.
             self.cube_search_results = []
             self._update_cube_result_tabs()
-            self.statusBar().showMessage('Cube cache cleared.')
+            gc.collect()
+            try:
+                cube_analyzer.reset_cache(self.config.cube_folder_path)
+                self.statusBar().showMessage('Cube cache cleared.')
+            except OSError as e:
+                QMessageBox.warning(self, 'Reset cube cache',
+                                    f'Could not delete all cached files. '
+                                    f'They may be in use.\n\n{e}')
+                self.statusBar().showMessage('Cube cache partially cleared.')
 
 
     ###########
@@ -1916,12 +1957,17 @@ class MainWindow(QMainWindow):
         return '%.1fnm' % self.cube.bands[layer_idx]
 
     def fill_db_spectra_combobox(self):
+        # Block signals while repopulating: clear()/addItem() would otherwise
+        # fire currentIndexChanged repeatedly, re-triggering update_spectrum_plot
+        # (and a cross-cube search) just from reloading the DB list.
+        self.cmb_comparison_ref.blockSignals(True)
         self.cmb_comparison_ref.clear()
         self.cmb_comparison_ref.addItem('(none)', -1)
         if self.db is not None:
             for i, s in enumerate(self.db.spectra):
                 self.cmb_comparison_ref.addItem(s.display_string(with_description=True), i)
         self.cmb_comparison_ref.adjustSize()
+        self.cmb_comparison_ref.blockSignals(False)
 
     def visualize_error_map(self, error_map):
         # invert and map to [0, 1]:

@@ -4,6 +4,11 @@ import matplotlib.pyplot as plt
 import spectral
 
 
+# Files produced by Specim IQ Studio as calibrated reflectance products carry
+# this prefix; they need no dark/white reference calibration.
+REFLECTANCE_PREFIX = 'REFLECTANCE_'
+
+
 class Cube:
 
     DEFAULT_RGB = (598, 548, 449) # wavelengths of red, green, blue, as in the standard settings of SpecimIQ Studio
@@ -60,31 +65,35 @@ class Cube:
                 break
 
         # read white and black ref
-        try:
-            dref_header = spectral.envi.open(file_dref_header, file_dref_data)
-            dref_data = dref_header.load()
-            wref_header = spectral.envi.open(file_wref_header, file_wref_data)
-            wref_data = wref_header.load()
-
-            dref_mean = np.mean(dref_data, axis=1)
-            wref_mean = np.mean(wref_data, axis=1)
-
-            # plot white and dark references
-            if verbose:
-                f, (dplot, wplot) = plt.subplots(1, 2)
-                dplot.plot(dref_header.bands.centers, dref_mean[0, :])
-                dplot.set_title('dark reference')
-                wplot.plot(dref_header.bands.centers, wref_mean[0, :])
-                wplot.set_title('white reference')
-                plt.show()
-
-            # use mean? or use all values? who knows?
-            self.data = (data - dref_data) / (wref_data - dref_data)
-
-        except Exception as e:
-            #self.data = np.clip(data / scale_factor, 0, 1)
+        if capture_id.startswith(REFLECTANCE_PREFIX):
+            # Already a calibrated reflectance product — no references needed.
             self.data = data / scale_factor
-            print(f"WARNING: Calibration failed ({e}), cube might be uncalibrated.")
+        else:
+            try:
+                dref_header = spectral.envi.open(file_dref_header, file_dref_data)
+                dref_data = dref_header.load()
+                wref_header = spectral.envi.open(file_wref_header, file_wref_data)
+                wref_data = wref_header.load()
+
+                dref_mean = np.mean(dref_data, axis=1)
+                wref_mean = np.mean(wref_data, axis=1)
+
+                # plot white and dark references
+                if verbose:
+                    f, (dplot, wplot) = plt.subplots(1, 2)
+                    dplot.plot(dref_header.bands.centers, dref_mean[0, :])
+                    dplot.set_title('dark reference')
+                    wplot.plot(dref_header.bands.centers, wref_mean[0, :])
+                    wplot.set_title('white reference')
+                    plt.show()
+
+                # use mean? or use all values? who knows?
+                self.data = (data - dref_data) / (wref_data - dref_data)
+
+            except Exception as e:
+                #self.data = np.clip(data / scale_factor, 0, 1)
+                self.data = data / scale_factor
+                print(f"WARNING: Calibration failed ({e}), cube might be uncalibrated.")
 
         if verbose:
             rgb = self.to_rgb()
@@ -163,16 +172,20 @@ class CubeLazy:
         # Memory-map the data file
         self._memmap = header.open_memmap(interleave='bip')
 
-        # Try to load dark/white references for calibration
-        try:
-            dref_header = spectral.envi.open(file_dref_header, file_dref_data)
-            self._dref_data = dref_header.load()
-            wref_header = spectral.envi.open(file_wref_header, file_wref_data)
-            self._wref_data = wref_header.load()
-            self._calibrated = True
-        except Exception as e:
+        # Try to load dark/white references for calibration. Reflectance
+        # products are already calibrated, so skip the lookup for them.
+        if capture_id.startswith(REFLECTANCE_PREFIX):
             self._calibrated = False
-            print(f"WARNING: Calibration failed ({e}), cube might be uncalibrated.")
+        else:
+            try:
+                dref_header = spectral.envi.open(file_dref_header, file_dref_data)
+                self._dref_data = dref_header.load()
+                wref_header = spectral.envi.open(file_wref_header, file_wref_data)
+                self._wref_data = wref_header.load()
+                self._calibrated = True
+            except Exception as e:
+                self._calibrated = False
+                print(f"WARNING: Calibration failed ({e}), cube might be uncalibrated.")
 
     def _apply_calibration(self, raw_data):
         """Apply calibration to raw data array."""

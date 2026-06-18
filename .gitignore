@@ -1,6 +1,7 @@
 /build/*
 /dist/*
 /venv/*
+/.venv/*
 /.idea/*
 *__pycache__*
 */hyperlyse.spec
@@ -15,3 +16,4 @@ contract.txt
 **/vectors/**
 **/cubes/**
 **/.hyperlyse_cache/
+**/data/**

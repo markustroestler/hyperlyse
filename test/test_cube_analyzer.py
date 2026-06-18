@@ -127,6 +127,44 @@ class TestDiscoverCubes:
         names = [os.path.basename(p) for p in result]
         assert names == ['cube.raw']
 
+    def test_prefers_reflectance_over_raw_specim_layout(self, tmp_path):
+        """Specim IQ scene: capture/<id>.raw + results/REFLECTANCE_<id>.dat.
+        Only the reflectance product should be returned."""
+        scene = tmp_path / 'Cod_22_f1r_2026-04-17_026'
+        _create_dummy_cube_file(str(scene / 'capture' / '2026-04-17_026.raw'))
+        _create_dummy_cube_file(str(scene / 'capture' / 'DARKREF_2026-04-17_026.raw'))
+        _create_dummy_cube_file(str(scene / 'capture' / 'WHITEREF_2026-04-17_026.raw'))
+        _create_dummy_cube_file(str(scene / 'results' / 'REFLECTANCE_2026-04-17_026.dat'))
+        result = discover_cubes(str(tmp_path), include_subfolders=True)
+        names = [os.path.basename(p) for p in result]
+        assert names == ['REFLECTANCE_2026-04-17_026.dat']
+
+    def test_falls_back_to_raw_when_no_reflectance(self, tmp_path):
+        """A scene with only the raw capture (no reflectance) keeps the raw."""
+        scene = tmp_path / 'Cod_22_f1r_2026-04-17_026'
+        _create_dummy_cube_file(str(scene / 'capture' / '2026-04-17_026.raw'))
+        _create_dummy_cube_file(str(scene / 'capture' / 'DARKREF_2026-04-17_026.raw'))
+        result = discover_cubes(str(tmp_path), include_subfolders=True)
+        names = [os.path.basename(p) for p in result]
+        assert names == ['2026-04-17_026.raw']
+
+    def test_prefers_reflectance_same_folder(self, tmp_path):
+        """Even in a flat folder, REFLECTANCE_<id> wins over <id>.raw."""
+        _create_dummy_cube_file(str(tmp_path / 'capture.raw'))
+        _create_dummy_cube_file(str(tmp_path / 'REFLECTANCE_capture.dat'))
+        result = discover_cubes(str(tmp_path))
+        names = [os.path.basename(p) for p in result]
+        assert names == ['REFLECTANCE_capture.dat']
+
+    def test_distinct_captures_not_collapsed(self, tmp_path):
+        """Different capture ids under the same scene root are kept separate."""
+        scene = tmp_path / 'scene'
+        _create_dummy_cube_file(str(scene / 'capture' / 'cap_001.raw'))
+        _create_dummy_cube_file(str(scene / 'capture' / 'cap_002.raw'))
+        result = discover_cubes(str(tmp_path), include_subfolders=True)
+        names = sorted(os.path.basename(p) for p in result)
+        assert names == ['cap_001.raw', 'cap_002.raw']
+
 
 # ---------------------------------------------------------------------------
 # Analysis pipeline tests
@@ -338,6 +376,59 @@ class TestSearchInCachedCubes:
         assert best['error'] < 1e-10  # near-zero error for exact match
         assert best['x'] == 2
         assert best['y'] == 1
+
+    def test_exclude_cube_file_skips_that_cube(self):
+        # Excluding the only cube leaves no cubes to search.
+        results = search_in_cached_cubes(
+            str(self.tmp_path), self.bands, self.target_spectrum,
+            sample_rate=1, num_hits=1, exclude_cube_file=self.cube_file)
+        assert results == []
+
+    def test_exclude_cube_file_none_searches_all(self):
+        results = search_in_cached_cubes(
+            str(self.tmp_path), self.bands, self.target_spectrum,
+            sample_rate=1, num_hits=1, exclude_cube_file=None)
+        assert len(results) >= 1
+
+    def test_exclude_other_cube_keeps_match(self, tmp_path):
+        # Excluding an unrelated path must not drop the real hit.
+        results = search_in_cached_cubes(
+            str(self.tmp_path), self.bands, self.target_spectrum,
+            sample_rate=1, num_hits=1,
+            exclude_cube_file=str(tmp_path / 'some_other_cube.raw'))
+        assert len(results) >= 1
+        assert results[0]['cube_file'] == self.cube_file
+
+    def test_exclude_raw_capture_skips_reflectance_scene(self, tmp_path):
+        # Specim layout: a scene has both capture/<id>.raw and
+        # results/REFLECTANCE_<id>.dat. discover_cubes returns only the
+        # reflectance .dat; excluding the raw capture the user opened must
+        # still skip that scene's cached reflectance product.
+        scene = tmp_path / 'scenes' / 'Cod_2026-04-17_026'
+        bands = np.linspace(400, 800, 12)
+        data = np.random.rand(4, 4, 12).astype(np.float64)
+        target = np.linspace(0.2, 0.8, 12)
+        data[0, 0, :] = target
+
+        raw_file = str(scene / 'capture' / '2026-04-17_026.raw')
+        dat_file = str(scene / 'results' / 'REFLECTANCE_2026-04-17_026.dat')
+        _create_mock_cube_with_data(raw_file, data, bands)
+        _create_mock_cube_with_data(dat_file, data, bands)
+
+        cube_folder = str(tmp_path / 'scenes')
+        analyze_cubes(cube_folder, sample_rate=1, include_subfolders=True,
+                      cube_class=MockCube)
+
+        # Only the reflectance .dat is discovered for this scene.
+        discovered = discover_cubes(cube_folder, include_subfolders=True)
+        assert [os.path.basename(p) for p in discovered] == \
+            ['REFLECTANCE_2026-04-17_026.dat']
+
+        # Excluding the raw capture the user opened removes the only scene.
+        results = search_in_cached_cubes(
+            cube_folder, bands, target, sample_rate=1, num_hits=1,
+            include_subfolders=True, exclude_cube_file=raw_file)
+        assert results == []
 
     def test_returns_up_to_num_hits(self):
         query = np.random.rand(20)
