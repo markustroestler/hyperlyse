@@ -263,6 +263,14 @@ class MainWindow(QMainWindow):
         self.drag_start_vs_v = 0
         self.rotation_quadrants = 0
 
+        # Spotlight ("hold F") mode: dim+desaturate the image and emphasize
+        # every marker/find with a pulsing ring. Momentary while F is held.
+        self.spotlight_active = False
+        self.spotlight_phase = 0.0
+        self.spotlight_timer = QTimer(self)
+        self.spotlight_timer.setInterval(40)  # ~25 fps pulse
+        self.spotlight_timer.timeout.connect(self._on_spotlight_tick)
+
         self.db = hyper.Database(config.default_db_path)
 
         # Phase 3: cube search results and hit color cycle
@@ -1739,6 +1747,11 @@ class MainWindow(QMainWindow):
         # Draw crosshair markers for each hit in this cube
         if len(img.shape) == 2:
             img = np.dstack([img, img, img])
+
+        spotlight = self.spotlight_active
+        pulse = self._spotlight_pulse() if spotlight else 0.0
+        if spotlight:
+            img = self._dim_desaturate(img)
         img_marker = img.copy()
 
         scale = self.sl_zoom.value() / 100
@@ -1759,6 +1772,12 @@ class MainWindow(QMainWindow):
             px = min(max(px, 0), ncols - 1)
             py = min(max(py, 0), nrows - 1)
 
+            if spotlight:
+                self._draw_emphasized_cross(img_marker, px, py, color,
+                                            nrows - 1, ncols - 1,
+                                            padding, cross_size, pulse)
+                continue
+
             # Horizontal line
             img_marker[max(py - padding, 0):min(py + padding + 1, nrows),
                        max(px - cross_size, 0):min(px + cross_size + 1, ncols)] = color
@@ -1766,7 +1785,8 @@ class MainWindow(QMainWindow):
             img_marker[max(py - cross_size, 0):min(py + cross_size + 1, nrows),
                        max(px - padding, 0):min(px + padding + 1, ncols)] = color
 
-        img = img * (1 - self.config.marker_alpha) + img_marker * self.config.marker_alpha
+        alpha = 1.0 if spotlight else self.config.marker_alpha
+        img = img * (1 - alpha) + img_marker * alpha
         img = img.astype(np.uint8)
 
         # Note: no rotation applied to hit cube images (rotation is for the source cube only)
@@ -1878,6 +1898,76 @@ class MainWindow(QMainWindow):
         else:
             raise ValueError()
 
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_F and not event.isAutoRepeat():
+            self._set_spotlight(True)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        if event.key() == Qt.Key.Key_F and not event.isAutoRepeat():
+            self._set_spotlight(False)
+            event.accept()
+            return
+        super().keyReleaseEvent(event)
+
+    def _set_spotlight(self, active):
+        if active == self.spotlight_active:
+            return
+        self.spotlight_active = active
+        if active:
+            self.spotlight_phase = 0.0
+            self.spotlight_timer.start()
+        else:
+            self.spotlight_timer.stop()
+        self.update_image_label()
+
+    def _on_spotlight_tick(self):
+        self.spotlight_phase += 0.20
+        self.update_image_label()
+
+    def _spotlight_pulse(self):
+        """Current pulse value in [0, 1] driven by the spotlight phase."""
+        return float((np.sin(self.spotlight_phase) + 1.0) / 2.0)
+
+    def _dim_desaturate(self, img, sat=0.15, dim=0.45):
+        """Push a uint8 H*W*3 image toward a dark, near-grayscale backdrop so
+        coloured markers pop. sat keeps a little colour; dim darkens overall."""
+        f = img.astype(np.float64)
+        lum = 0.299 * f[:, :, 0] + 0.587 * f[:, :, 1] + 0.114 * f[:, :, 2]
+        gray = np.dstack([lum, lum, lum])
+        out = (sat * f + (1.0 - sat) * gray) * dim
+        return np.clip(out, 0, 255).astype(np.uint8)
+
+    def _draw_emphasized_cross(self, buf, px, py, color, row_hi, col_hi, padding, cross_size, pulse):
+        """Draw a high-visibility marker: white-haloed colour cross plus a
+        breathing white ring around the point. Coordinates are clamped."""
+        px = int(min(max(px, 0), col_hi))
+        py = int(min(max(py, 0), row_hi))
+        white = [255, 255, 255]
+        cs = cross_size
+        hp = padding + 1  # halo is one pixel thicker than the colour arm
+
+        # white halo cross (drawn first, slightly thicker)
+        buf[max(py - hp, 0):min(py + hp + 1, row_hi), max(px - cs, 0):min(px + cs + 1, col_hi)] = white
+        buf[max(py - cs, 0):min(py + cs + 1, row_hi), max(px - hp, 0):min(px + hp + 1, col_hi)] = white
+        # colour cross on top
+        buf[max(py - padding, 0):min(py + padding + 1, row_hi), max(px - cs, 0):min(px + cs + 1, col_hi)] = color
+        buf[max(py - cs, 0):min(py + cs + 1, row_hi), max(px - padding, 0):min(px + padding + 1, col_hi)] = color
+        # central white dot
+        buf[max(py - padding, 0):min(py + padding + 1, row_hi), max(px - padding, 0):min(px + padding + 1, col_hi)] = white
+
+        # breathing ring (hollow square) around the point
+        r = int(round(cs + 2 + pulse * (cs + 2)))
+        th = padding + 1
+        x0, x1 = max(px - r, 0), min(px + r + 1, col_hi)
+        y0, y1 = max(py - r, 0), min(py + r + 1, row_hi)
+        buf[max(py - r, 0):min(py - r + th, row_hi), x0:x1] = white          # top
+        buf[max(py + r - th + 1, 0):min(py + r + 1, row_hi), x0:x1] = white  # bottom
+        buf[y0:y1, max(px - r, 0):min(px - r + th, col_hi)] = white          # left
+        buf[y0:y1, max(px + r - th + 1, 0):min(px + r + 1, col_hi)] = white  # right
+
     def draw_marker(self, img):
         """
         Draws crosses (for point selections) or rectangles (for area selections) onto an image.
@@ -1889,6 +1979,11 @@ class MainWindow(QMainWindow):
 
         if len(img.shape) == 2:
             img = np.dstack([img, img, img])
+
+        spotlight = self.spotlight_active
+        pulse = self._spotlight_pulse() if spotlight else 0.0
+        if spotlight:
+            img = self._dim_desaturate(img)
         img_marker = img.copy()
 
         scale = self.sl_zoom.value() / 100
@@ -1904,7 +1999,12 @@ class MainWindow(QMainWindow):
         for i, sel in enumerate(self.selections):
             color = hover_color if i == self.hovered_selection_idx else sel.color_rgb
 
-            if sel.sel_type == 'rect':
+            if spotlight and sel.sel_type == 'point':
+                p = sel.point
+                self._draw_emphasized_cross(img_marker, p.x(), p.y(), color,
+                                            self.cube.nrows - 1, self.cube.ncols - 1,
+                                            padding, cross_size, pulse)
+            elif sel.sel_type == 'rect':
                 r = sel.rect
                 # top line
                 img_marker[max(r.top() - padding, 0):min(r.top() + padding + 1, self.cube.nrows - 1),
@@ -1931,7 +2031,8 @@ class MainWindow(QMainWindow):
                 img_marker[max(p.y() - padding, 0):min(p.y() + padding + 1, self.cube.nrows - 1),
                           max(p.x() - padding, 0):min(p.x() + padding + 1, self.cube.ncols - 1)] = [255, 255, 255]
 
-        img = img * (1 - self.config.marker_alpha) + img_marker * self.config.marker_alpha
+        alpha = 1.0 if spotlight else self.config.marker_alpha
+        img = img * (1 - alpha) + img_marker * alpha
         return img.astype(np.uint8)
 
     def selection_coords(self, selection=None):
