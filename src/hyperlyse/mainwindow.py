@@ -291,6 +291,14 @@ class MainWindow(QMainWindow):
         self.cube_search_results = []  # list of hit dicts from cube_analyzer.search_in_cached_cubes
         self._search_worker = None  # CubeSearchWorker instance when search is running
 
+        # Per-hit-cube render caches (keyed by cache_dir) so the mode views
+        # (layers/similarity/PCA) work on matched cubes just like the source.
+        # spectra survive setting changes; error-map/pca are invalidated by the
+        # same recompute flags that invalidate the source cube's versions.
+        self._hit_spectra_cache = {}
+        self._hit_error_map_cache = {}
+        self._hit_pca_cache = {}
+
         self.last_source_name = ''
         self.last_export_dir = ''
 
@@ -779,6 +787,9 @@ class MainWindow(QMainWindow):
         self.error_map_recompute_flag = True
         self.pca_recompute_flag = True
         self.cube_search_results = []
+        self._hit_spectra_cache.clear()
+        self._hit_error_map_cache.clear()
+        self._hit_pca_cache.clear()
         self._update_cube_result_tabs()
         self.tabs_img_ctrl.setCurrentIndex(0)
         self.sl_lambda.setValue(0)
@@ -794,9 +805,13 @@ class MainWindow(QMainWindow):
 
     def set_recompute_errmap_flag(self):
         self.error_map_recompute_flag = True
+        # Matched-cube error maps depend on the same settings (range, gradient,
+        # squared errors, reference spectrum) — drop them so they recompute too.
+        self._hit_error_map_cache.clear()
 
     def set_recompute_pca_flag(self):
         self.pca_recompute_flag = True
+        self._hit_pca_cache.clear()
 
     def update_image_label(self):
         # Check if we're viewing a cube hit tab (not the Source tab)
@@ -819,15 +834,7 @@ class MainWindow(QMainWindow):
                     self.lbl_lambda.setText(self.get_lambda_slider_text(layer))
         # 2 - similarity
         elif self.tabs_img_ctrl.currentIndex() == 2:
-            ref_x = None
-            ref_y = None
-            if self.rb_sim_cube.isChecked():
-                if self.spectrum_y is not None:
-                    ref_x = self.cube.bands
-                    ref_y = self.spectrum_y
-            elif self.cmb_comparison_ref.currentData() >= 0:
-                ref_x = self.db.spectra[self.cmb_comparison_ref.currentData()].x
-                ref_y = self.db.spectra[self.cmb_comparison_ref.currentData()].y
+            ref_x, ref_y = self._current_similarity_reference()
             if ref_y is not None and self.cube is not None:
                 if self.error_map_recompute_flag:
                     self.error_map_recompute_flag = False
@@ -1425,7 +1432,10 @@ class MainWindow(QMainWindow):
                     self.statusBar().showMessage(f'Cube folder set: {new_cube_path}')
 
             # Apply sample rate
-            self.config.sample_rate = data['sample_rate']
+            old_sample_rate = self.config.sample_rate
+            new_sample_rate = data['sample_rate']
+            sample_rate_changed = new_sample_rate != old_sample_rate
+            self.config.sample_rate = new_sample_rate
 
             # Apply num_hits and sync menu
             self.config.num_hits = data['num_hits']
@@ -1450,6 +1460,42 @@ class MainWindow(QMainWindow):
             self.config.use_pca = data.get('use_pca', False)
 
             self.config.save()
+
+            # The sample rate only affects cubes when they are (re-)analyzed;
+            # existing caches keep the rate they were built at. Make that
+            # explicit instead of letting the change silently do nothing.
+            if sample_rate_changed:
+                self._prompt_sample_rate_changed(old_sample_rate, new_sample_rate)
+
+    def _prompt_sample_rate_changed(self, old_sample_rate, new_sample_rate):
+        """After the sample rate changes, tell the user it won't take effect
+        until cubes are re-analyzed and offer: keep it (Ok), re-analyze now,
+        or revert to the previous value (Cancel)."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setWindowTitle('Sample rate changed')
+        box.setText(
+            'The new sample rate does not affect cube searches until the cubes '
+            'are re-analyzed.')
+        box.setInformativeText(
+            f'The cached cubes were analyzed at sample rate {old_sample_rate} '
+            f'and searches keep using that until you re-analyze at '
+            f'{new_sample_rate}.\n\n'
+            'Analyze Now: re-analyze all cubes at the new rate.\n'
+            'OK: keep the new rate for the next analysis.\n'
+            'Cancel: revert to the previous rate.')
+        analyze_btn = box.addButton('Analyze Now', QMessageBox.ButtonRole.AcceptRole)
+        ok_btn = box.addButton(QMessageBox.StandardButton.Ok)
+        cancel_btn = box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(ok_btn)
+        box.exec()
+
+        clicked = box.clickedButton()
+        if clicked is cancel_btn:
+            self.config.sample_rate = old_sample_rate
+            self.config.save()
+        elif clicked is analyze_btn:
+            self.handle_action_analyze_cubes()
 
     def handle_set_num_hits(self, num):
         self.config.num_hits = num
@@ -1659,6 +1705,9 @@ class MainWindow(QMainWindow):
             # into the cached .npy files, and on Windows an open mmap handle
             # blocks deletion of the file it maps.
             self.cube_search_results = []
+            self._hit_spectra_cache.clear()
+            self._hit_error_map_cache.clear()
+            self._hit_pca_cache.clear()
             self._update_cube_result_tabs()
             gc.collect()
             try:
@@ -1718,6 +1767,138 @@ class MainWindow(QMainWindow):
         """When user clicks a cube result tab, update the image display."""
         self.update_image_label()
 
+    def _current_similarity_reference(self):
+        """Reference (x, y) for the similarity mode given the current UI state.
+
+        Either the active cube selection spectrum (compared against the source
+        cube's bands) or the chosen database spectrum. Returns (None, None) when
+        nothing usable is selected. Shared by the source and matched-cube views
+        so both compare against the same reference.
+        """
+        if self.rb_sim_cube.isChecked():
+            if self.spectrum_y is not None and self.cube is not None:
+                return np.array(self.cube.bands), self.spectrum_y
+        else:
+            idx = self.cmb_comparison_ref.currentData()
+            if idx is not None and idx >= 0:
+                ref = self.db.spectra[idx]
+                return np.array(ref.x), ref.y
+        return None, None
+
+    @staticmethod
+    def _lambda2layer(bands, lmd):
+        """Nearest band index in `bands` to wavelength `lmd`."""
+        diffs = [abs(lmd - l) for l in bands]
+        return diffs.index(min(diffs))
+
+    def _get_hit_spectra(self, cache_dir):
+        """Load (and cache) the sampled spectra for a matched cube."""
+        spectra = self._hit_spectra_cache.get(cache_dir)
+        if spectra is None:
+            spectra = cube_analyzer.load_spectra(cache_dir)
+            if spectra is not None:
+                self._hit_spectra_cache[cache_dir] = spectra
+        return spectra
+
+    def _get_hit_error_map(self, cache_dir, spectra, bands, ref_x, ref_y):
+        """Similarity error map for a matched cube vs the reference spectrum."""
+        error_map = self._hit_error_map_cache.get(cache_dir)
+        if error_map is None:
+            error_map = self.db.compare_spectra(
+                bands, spectra, np.array(ref_x), ref_y,
+                custom_range=(self.rs_xrange.start(), self.rs_xrange.end()),
+                use_gradient=self.cb_gradient.isChecked(),
+                squared_errs=self.cb_squared.isChecked())
+            if error_map is None:
+                return None
+            self._hit_error_map_cache[cache_dir] = error_map
+        return error_map
+
+    def _get_hit_pca(self, cache_dir, spectra, bands):
+        """PCA stack for a matched cube over the current comparison range."""
+        pca = self._hit_pca_cache.get(cache_dir)
+        if pca is None:
+            band_min = self._lambda2layer(bands, self.rs_xrange.start())
+            band_max = self._lambda2layer(bands, self.rs_xrange.end())
+            if band_max <= band_min:
+                return None
+            sub = spectra[:, :, band_min:band_max]
+            n_components = min(10, sub.shape[2], sub.shape[0] * sub.shape[1])
+            if n_components < 1:
+                return None
+            pca = hyper.principal_component_analysis(sub, p_keep=0.01,
+                                                     n_components=n_components)
+            self._hit_pca_cache[cache_dir] = pca
+        return pca
+
+    @staticmethod
+    def _upscale_to_full(img, nrows, ncols, sample_rate):
+        """Nearest-neighbour upscale a sampled-resolution image to the cube's
+        full pixel grid, so markers and zoom line up across all modes. Works for
+        2D (grayscale) and 3D (RGB) arrays."""
+        if img.shape[0] == nrows and img.shape[1] == ncols:
+            return img
+        sr = max(int(sample_rate), 1)
+        row_idx = np.minimum(np.arange(nrows) // sr, img.shape[0] - 1)
+        col_idx = np.minimum(np.arange(ncols) // sr, img.shape[1] - 1)
+        return img[row_idx][:, col_idx]
+
+    def _hit_base_image(self, hits):
+        """Compute the base float image [0,1] for a matched cube according to the
+        currently selected display mode. Returns HxW or HxWx3, upscaled to the
+        cube's full pixel resolution, or None when unavailable."""
+        cache_dir = hits[0]['cache_dir']
+        nrows = hits[0]['nrows']
+        ncols = hits[0]['ncols']
+        mode = self.tabs_img_ctrl.currentIndex()
+
+        # RGB: the cached preview is already at full resolution.
+        if mode == 0:
+            rgb = cube_analyzer.load_rgb_preview(cache_dir)
+            if rgb is None:
+                return None
+            return rgb.astype(np.float64) / 255.0
+
+        # All other modes operate on the cached (sampled) spectral data.
+        meta = cube_analyzer.load_metadata(cache_dir)
+        spectra = self._get_hit_spectra(cache_dir)
+        if meta is None or spectra is None:
+            return None
+        bands = np.array(meta['bands'])
+        sample_rate = meta.get('sample_rate', 1)
+
+        img = None
+        # 1 - single layer
+        if mode == 1:
+            layer = self.sl_lambda.value()
+            if 0 <= layer < spectra.shape[2]:
+                img = spectra[:, :, layer]
+                self.lbl_lambda.setText('%.1fnm' % bands[layer])
+        # 2 - similarity
+        elif mode == 2:
+            ref_x, ref_y = self._current_similarity_reference()
+            if ref_y is not None:
+                error_map = self._get_hit_error_map(cache_dir, spectra, bands, ref_x, ref_y)
+                if error_map is not None:
+                    err_map_t = error_map.copy()
+                    t = (100 - self.sl_sim_t.value()) / 100 * err_map_t.max()
+                    err_map_t[err_map_t > t] = t
+                    img = self.visualize_error_map(err_map_t)
+        # 3 - PCA
+        elif mode == 3:
+            component = self.sl_component.value()
+            pca = self._get_hit_pca(cache_dir, spectra, bands)
+            if pca is not None and 0 <= component < pca.shape[2]:
+                img = pca[:, :, component]
+                denom = img.max() - img.min()
+                img = (img - img.min()) / denom if denom > 0 else np.zeros_like(img)
+                self.lbl_component.setText(f'PC {component}')
+
+        if img is None:
+            return None
+        return self._upscale_to_full(np.asarray(img, dtype=np.float64),
+                                     nrows, ncols, sample_rate)
+
     def _display_cube_hit_image(self):
         """Render the cube hit image for the currently selected hit tab."""
         tab_index = self.tabs_cube_results.currentIndex()
@@ -1729,14 +1910,12 @@ class MainWindow(QMainWindow):
         if not hits:
             return
 
-        # Load RGB preview from cache
-        cache_dir = hits[0]['cache_dir']
-        rgb = cube_analyzer.load_rgb_preview(cache_dir)
-        if rgb is None:
+        # Build the base image for the currently selected mode (RGB / layers /
+        # similarity / PCA), so matched cubes respond to the mode tabs and their
+        # sliders exactly like the source cube does.
+        img = self._hit_base_image(hits)
+        if img is None:
             return
-
-        # Convert from uint8 [0,255] to float [0,1] for consistent processing
-        img = rgb.astype(np.float64) / 255.0
 
         # Adjust brightness
         img = img * self.sl_brightness.value() / 100

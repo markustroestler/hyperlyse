@@ -130,8 +130,15 @@ def _cache_dir_for_cube(cube_folder, cube_filepath):
     return os.path.join(cube_folder, '.hyperlyse_cache', 'cube_vectors', sanitized)
 
 
-def _is_cache_valid(cache_dir, cube_filepath, sample_rate):
-    """Check if a cube's cache is valid and complete."""
+def _is_cache_valid(cache_dir, cube_filepath, sample_rate, check_sample_rate=True):
+    """Check if a cube's cache is valid and complete.
+
+    :param check_sample_rate: When True (analysis phase) the cache is only valid
+        if it was built at the requested sample_rate, so changing the rate forces
+        a re-analysis. The cross-cube search passes False: it reads each cube's
+        actual sample_rate from metadata when mapping hits, so a cache built at
+        any rate is usable and changing the UI rate must not blank out results.
+    """
     meta_path = os.path.join(cache_dir, 'metadata.json')
     if not os.path.isfile(meta_path):
         return False
@@ -145,7 +152,7 @@ def _is_cache_valid(cache_dir, cube_filepath, sample_rate):
         return False
     if meta.get('pipeline_version') != PIPELINE_VERSION:
         return False
-    if meta.get('sample_rate') != sample_rate:
+    if check_sample_rate and meta.get('sample_rate') != sample_rate:
         return False
 
     # Check file modification
@@ -379,7 +386,9 @@ def search_in_cached_cubes(cube_folder, x_query, y_query,
             progress_callback(i, total, cube_name, avg_time)
         cache_dir = _cache_dir_for_cube(cube_folder, cube_filepath)
 
-        if not _is_cache_valid(cache_dir, cube_filepath, sample_rate):
+        # Search uses whatever cache exists, regardless of the current UI sample
+        # rate; hit coordinates are mapped using each cube's own cached rate.
+        if not _is_cache_valid(cache_dir, cube_filepath, sample_rate, check_sample_rate=False):
             continue
 
         # Load metadata
@@ -591,6 +600,31 @@ def reset_cache(cube_folder):
 def load_rgb_preview(cache_dir):
     """Load the RGB preview image from a cube's cache directory."""
     path = os.path.join(cache_dir, 'rgb_preview.npy')
+    if os.path.isfile(path):
+        return np.load(path)
+    return None
+
+
+def load_metadata(cache_dir):
+    """Load the metadata dict from a cube's cache directory, or None."""
+    path = os.path.join(cache_dir, 'metadata.json')
+    if os.path.isfile(path):
+        try:
+            with open(path, 'r') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return None
+    return None
+
+
+def load_spectra(cache_dir):
+    """Load the cached (spatially sampled) spectra cube into memory.
+
+    Reads fully into RAM rather than memory-mapping so the caller can hold the
+    array without keeping an OS file handle open (on Windows an open mmap blocks
+    deletion of the backing .npy during a cache reset). Returns None if missing.
+    """
+    path = os.path.join(cache_dir, 'spectra.npy')
     if os.path.isfile(path):
         return np.load(path)
     return None
