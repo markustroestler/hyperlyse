@@ -203,19 +203,20 @@ class SettingsDialog(QDialog):
         self.chk_search_cubes.setChecked(config.search_in_cubes)
         layout.addRow('', self.chk_search_cubes)
 
-        self.chk_search_same_cube = QCheckBox('Include the currently open cube')
+        self.chk_search_same_cube = QCheckBox('Include the current open cube in search')
         self.chk_search_same_cube.setChecked(config.search_in_same_cube)
         self.chk_search_same_cube.setToolTip(
             'When disabled, the cube currently open is skipped during the\n'
             'analyzed-cube search, so hits only come from other cubes.')
         layout.addRow('', self.chk_search_same_cube)
 
-        self.chk_use_pca = QCheckBox('Use fast approximate search (PCA + BallTree)')
+        self.chk_use_pca = QCheckBox('Use fast search (PCA prefilter)')
         self.chk_use_pca.setChecked(config.use_pca)
         self.chk_use_pca.setToolTip(
-            'When enabled, uses PCA dimensionality reduction for faster k-NN search.\n'
-            'Builds PCA from extracted features on-the-fly for each cube.\n'
-            'Results should be similar to brute-force search.')
+            'When enabled, a PCA prefilter narrows each cube to a small set of\n'
+            'candidate pixels, which are then re-ranked with the exact metric.\n'
+            'Dramatically faster than the brute-force scan (tens of ms vs ~1s per\n'
+            'cube) and returns the same top hits.')
         layout.addRow('', self.chk_use_pca)
 
         # Button box

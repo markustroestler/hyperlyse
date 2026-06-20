@@ -518,6 +518,61 @@ class TestSearchInCachedCubes:
         assert results[0]['error'] < 1e-10
 
 
+class TestParallelism:
+    """Analysis and search fan out over cubes; results must be independent of
+    worker count and order-stable."""
+
+    def _make_collection(self, tmp_path, n=6):
+        np.random.seed(7)
+        bands = np.linspace(400, 800, 12)
+        target = np.linspace(0.2, 0.8, 12)
+        for k in range(n):
+            data = np.random.rand(4, 4, 12).astype(np.float64)
+            # Plant the target (with a per-cube offset) so errors are distinct.
+            data[k % 4, (k + 1) % 4, :] = target + k * 0.005
+            _create_mock_cube_with_data(
+                str(tmp_path / f'cube_{k}.raw'), data, bands)
+        return bands, target
+
+    def test_analyze_cubes_parallel_matches_sequential(self, tmp_path):
+        bands, _ = self._make_collection(tmp_path)
+        seq = analyze_cubes(str(tmp_path), sample_rate=1, cube_class=MockCube,
+                            max_workers=1)
+        # Re-analyze in parallel after a reset to compare returned ordering.
+        reset_cache(str(tmp_path))
+        par = analyze_cubes(str(tmp_path), sample_rate=1, cube_class=MockCube,
+                            max_workers=4)
+        # Discovery order is preserved regardless of worker count.
+        assert [os.path.basename(c) for c, _ in seq] == \
+               [os.path.basename(c) for c, _ in par]
+        assert len(par) == 6
+
+    def test_analyze_progress_one_call_per_cube(self, tmp_path):
+        self._make_collection(tmp_path)
+        calls = []
+        def cb(current, total, name, avg, skipped=False):
+            calls.append((current, total, name, skipped))
+        analyze_cubes(str(tmp_path), sample_rate=1, cube_class=MockCube,
+                      progress_callback=cb, max_workers=4)
+        assert len(calls) == 6
+        assert all(c[1] == 6 for c in calls)
+        # Completion indices are 0..5 regardless of finishing order.
+        assert sorted(c[0] for c in calls) == [0, 1, 2, 3, 4, 5]
+
+    def test_search_parallel_matches_sequential(self, tmp_path):
+        bands, target = self._make_collection(tmp_path)
+        analyze_cubes(str(tmp_path), sample_rate=1, cube_class=MockCube)
+        seq = search_in_cached_cubes(
+            str(tmp_path), bands, target, sample_rate=1, num_hits=5,
+            max_workers=1)
+        par = search_in_cached_cubes(
+            str(tmp_path), bands, target, sample_rate=1, num_hits=5,
+            max_workers=4)
+        assert [(h['cube_file'], h['x'], h['y']) for h in seq] == \
+               [(h['cube_file'], h['x'], h['y']) for h in par]
+        assert [h['error'] for h in par] == sorted(h['error'] for h in par)
+
+
 class TestSearchMultipleCubes:
 
     def test_merges_results_across_cubes(self, tmp_path):
@@ -632,7 +687,7 @@ class TestPCAArtifacts:
                                  cube_class=MockCube)
 
         assert os.path.isfile(os.path.join(cache_dir, 'pca_model.joblib'))
-        assert os.path.isfile(os.path.join(cache_dir, 'search_index.joblib'))
+        assert os.path.isfile(os.path.join(cache_dir, 'pca_features.npy'))
 
     def test_pca_metadata_fields(self, tmp_path):
         cube_file = str(tmp_path / 'capture.raw')
@@ -721,6 +776,31 @@ class TestPCASearch:
         assert bf[0]['x'] == pca[0]['x']
         assert bf[0]['y'] == pca[0]['y']
 
+    def test_pca_error_comparable_to_bruteforce(self):
+        """PCA hits are re-ranked with the exact metric, so the reported error is
+        on the same scale as brute-force (not a PCA-space distance)."""
+        query = np.random.rand(20)
+        bf = search_in_cached_cubes(
+            str(self.tmp_path), self.bands, query,
+            sample_rate=1, num_hits=1, use_pca=False)
+        pca = search_in_cached_cubes(
+            str(self.tmp_path), self.bands, query,
+            sample_rate=1, num_hits=1, use_pca=True)
+        # Same winning pixel and the same (comparable) error magnitude.
+        assert bf[0]['x'] == pca[0]['x']
+        assert bf[0]['y'] == pca[0]['y']
+        assert np.isclose(bf[0]['error'], pca[0]['error'])
+
+    def test_pca_respects_custom_range(self):
+        """PCA mode honors custom_range when re-ranking candidates."""
+        results = search_in_cached_cubes(
+            str(self.tmp_path), self.bands, self.target_spectrum,
+            sample_rate=1, num_hits=1, use_pca=True, custom_range=(500, 700))
+        assert len(results) >= 1
+        assert results[0]['x'] == 2
+        assert results[0]['y'] == 1
+        assert results[0]['error'] < 1e-10
+
     def test_pca_fallback_when_no_pca_files(self, tmp_path):
         """If PCA artifacts are missing, use_pca=True falls back to brute-force."""
         bands = np.linspace(400, 800, 10)
@@ -733,7 +813,7 @@ class TestPCASearch:
 
         # Delete PCA files to simulate an old cache
         cache_dir = _cache_dir_for_cube(str(tmp_path), cube_file)
-        for f in ['pca_model.joblib', 'spectra_pca.npy', 'search_index.joblib']:
+        for f in ['pca_model.joblib', 'pca_features.npy', 'pca_features_gradient.npy']:
             path = os.path.join(cache_dir, f)
             if os.path.isfile(path):
                 os.remove(path)

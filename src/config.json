@@ -21,10 +21,10 @@
   ],
   "MARKER_ALPHA": 0.5,
   "CUBE_FOLDER_PATH": "C:/Users/markus/Documents/repos/hyperlyse/data",
-  "SAMPLE_RATE": 3,
-  "SEARCH_IN_DB": true,
-  "SEARCH_IN_CUBES": true,
+  "SAMPLE_RATE": 1,
+  "SEARCH_IN_DB": false,
+  "SEARCH_IN_CUBES": false,
   "SEARCH_IN_SAME_CUBE": false,
   "NUM_HITS": 5,
-  "USE_PCA": false
+  "USE_PCA": true
 }

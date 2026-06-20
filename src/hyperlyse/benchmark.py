@@ -79,12 +79,16 @@ def benchmark_analyze_cube(cube_filepath, cube_folder, sample_rate=1,
     results['sampled_shape'] = list(spectra.shape)
     results['spectra_size_mb'] = round(spectra.nbytes / (1024 * 1024), 1)
 
-    # Report PCA/BallTree if they were built (only on new optimized code)
+    # Report PCA artifacts if they were built (only on new optimized code).
+    # The fast-search index is a stored array of PCA-projected pixel features
+    # (queried with a vectorized k-NN); there is no longer a BallTree.
     pca_path = os.path.join(cache_dir, 'pca_model.joblib')
-    index_path = os.path.join(cache_dir, 'search_index.joblib')
+    features_path = os.path.join(cache_dir, 'pca_features.npy')
     if os.path.isfile(pca_path):
         results['pca_built'] = True
-    if os.path.isfile(index_path):
+    if os.path.isfile(features_path):
+        results['pca_features_built'] = True
+        # Back-compat alias for older benchmark comparisons / tests.
         results['balltree_built'] = True
 
     with open(os.path.join(cache_dir, 'metadata.json'), 'r') as f:

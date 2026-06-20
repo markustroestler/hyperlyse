@@ -71,12 +71,19 @@ class CubeAnalysisWorker(QThread):
                     self._analyzed += 1
                 self.progress.emit(i + 1, total, name, avg_time, skipped)
 
+            # Analyze sequentially (max_workers=1). analyze_cubes supports a
+            # thread pool, but several cubes analyzed at once on background
+            # threads contend for the GIL with the Qt GUI thread, freezing the
+            # progress dialog (and multiply peak RAM). One cube at a time keeps
+            # the UI responsive; per-cube analysis is still faster than before
+            # thanks to the subsampled PCA fit.
             cube_analyzer.analyze_cubes(
                 self.cube_folder,
                 sample_rate=self.sample_rate,
                 include_subfolders=self.include_subfolders,
                 progress_callback=on_progress,
-                discovered_callback=self.discovered.emit)
+                discovered_callback=self.discovered.emit,
+                max_workers=1)
             self.finished.emit(self._analyzed, self._skipped)
         except Exception as e:
             self.error.emit(traceback.format_exc())
@@ -301,6 +308,10 @@ class MainWindow(QMainWindow):
 
         self.last_source_name = ''
         self.last_export_dir = ''
+
+        # (x, y) pixel selection to seed once a matched cube finishes loading as
+        # the new source; consumed in _on_cube_loaded. None when not pending.
+        self._pending_source_selection = None
 
         ########################
         ########################
@@ -723,6 +734,14 @@ class MainWindow(QMainWindow):
         self.action_search_in_cubes.setChecked(self.config.search_in_cubes)
         self.action_search_in_cubes.toggled.connect(self.handle_toggle_search_in_cubes)
 
+        self.action_search_in_same_cube = menu_settings.addAction('Include the current open cube in search')
+        self.action_search_in_same_cube.setCheckable(True)
+        self.action_search_in_same_cube.setChecked(self.config.search_in_same_cube)
+        self.action_search_in_same_cube.setToolTip(
+            'When disabled, the cube currently open is skipped during the\n'
+            'analyzed-cube search, so hits only come from other cubes.')
+        self.action_search_in_same_cube.toggled.connect(self.handle_toggle_search_in_same_cube)
+
         menu_settings.addSeparator()
 
         self.action_analyze_cubes = menu_settings.addAction('&Analyze cubes now')
@@ -902,7 +921,26 @@ class MainWindow(QMainWindow):
                 scaled_height = int(height * scale)
                 self.lbl_img.resize(scaled_width, scaled_height)
 
-    def update_spectrum_plot(self):
+    def _replot_cube_results(self):
+        """Replot the already-computed cube search hits, reusing the colors they
+        were assigned when the search ran. Used to redraw the plot (e.g. after a
+        reference-DB toggle) without re-running the cube search."""
+        for hit in self.cube_search_results:
+            self.plot.plot(hit['spectrum_x'],
+                           hit['spectrum_y'],
+                           label=f"{hit['cube_name']} ({hit['x']},{hit['y']}) (mean err={hit['error']:10.3E})",
+                           linewidth=1,
+                           hold=True,
+                           color=hit.get('_color_hex'))
+
+    def update_spectrum_plot(self, run_cube_search=True):
+        """Redraw the spectrum plot for the current selection.
+
+        :param run_cube_search: When True (a new selection / range change),
+            launch a fresh cross-cube search. When False (e.g. toggling the
+            reference-DB source), the existing cube hits are replotted from cache
+            instead of re-running the search.
+        """
 
         self.plot.set_ranges(self.rs_xrange.start(),
                              self.rs_xrange.end(),
@@ -948,10 +986,11 @@ class MainWindow(QMainWindow):
                                        defer_draw=True)
             # 1 - search
             elif self.tabs_spectra_source.currentIndex() == 1:
-                # Clear previous cube search results before starting new search
-                self.cube_search_results = []
-                self._update_cube_result_tabs()
-                self.update_image_label()  # Refresh image display to remove old crosshairs
+                if run_cube_search:
+                    # Starting a fresh search: drop the previous cube results.
+                    self.cube_search_results = []
+                    self._update_cube_result_tabs()
+                self.update_image_label()  # Refresh crosshairs for current results
                 hit_index = 0  # global color index across all results
 
                 # Search in JDX database
@@ -973,11 +1012,21 @@ class MainWindow(QMainWindow):
 
                 # Search in analyzed cubes (background worker with progress)
                 if self.config.search_in_cubes and self.config.cube_folder_path:
-                    self._search_hit_index_offset = hit_index
-                    self._start_cube_search()
+                    if run_cube_search:
+                        self._search_hit_index_offset = hit_index
+                        self._start_cube_search()
+                    else:
+                        # Redraw only: reuse the existing cube hits instead of
+                        # re-running the (expensive) search.
+                        self._replot_cube_results()
                 else:
+                    # Cube search is off: stop any in-flight search so it can't
+                    # re-plot stale hits, clear the current cube results, and
+                    # refresh the image so its crosshairs go away too.
+                    self._cancel_cube_search()
                     self.cube_search_results = []
                     self._update_cube_result_tabs()
+                    self.update_image_label()
 
         # Single draw after all plot calls
         self.plot.draw()
@@ -1017,6 +1066,7 @@ class MainWindow(QMainWindow):
                                         f'{self.cube.nbands} bands.')
             self.sl_zoom.setValue(int(self.width() * self.config.initial_image_width_ratio / self.cube.ncols * 100))
             self.loading_dialog.accept()
+            self._apply_pending_source_selection()
         except Exception as e:
             self._on_cube_load_error(str(e))
 
@@ -1024,6 +1074,34 @@ class MainWindow(QMainWindow):
         """Handle cube loading error."""
         print(f"Error loading file:\n{error_message}")
         self.loading_dialog.set_error(error_message)
+        self._pending_source_selection = None
+
+    def _apply_pending_source_selection(self):
+        """After a matched cube loads as the new source, seed the point the user
+        clicked as a selection and run a fresh search on it. No-op when nothing
+        is pending."""
+        pending = self._pending_source_selection
+        self._pending_source_selection = None
+        if pending is None or self.cube is None:
+            return
+        x, y = pending
+        if not (0 <= x < self.cube.ncols and 0 <= y < self.cube.nrows):
+            return
+
+        spectrum_y = self.cube.data[y, x, :]
+        label = f"P1 ({x},{y})"
+        sel = self._make_selection('point', QPoint(x, y), None, spectrum_y, label)
+        self.selections.append(sel)
+        self._renumber_selections()
+        self.set_recompute_errmap_flag()
+
+        # Switch to Search mode without double-triggering the search via the
+        # currentChanged signal, then run it once.
+        self.tabs_spectra_source.blockSignals(True)
+        self.tabs_spectra_source.setCurrentIndex(1)
+        self.tabs_spectra_source.blockSignals(False)
+        self.update_image_label()
+        self.update_spectrum_plot()
 
 
     def handle_action_load_data(self):
@@ -1115,7 +1193,11 @@ class MainWindow(QMainWindow):
 
     def handle_release_on_image(self, event):
         if self._is_viewing_hit_tab():
-            event.ignore()
+            if event.button() == Qt.MouseButton.LeftButton:
+                self._prompt_make_source(self._hit_click_to_data_point(event.pos()))
+                event.accept()
+            else:
+                event.ignore()
             return
         if event.button() == Qt.MouseButton.LeftButton:
             if self.cube is not None:
@@ -1166,6 +1248,47 @@ class MainWindow(QMainWindow):
                 self.rubberband_selector.hide()
         else:
             event.ignore()
+
+    def _hit_click_to_data_point(self, pos):
+        """Click position on the label -> (x, y) pixel in the matched cube being
+        viewed. Hit images are shown without rotation, so only the zoom scale
+        applies. Clamped to the matched cube's bounds."""
+        point_on_pixmap = self.label_to_pixmap_point(pos)
+        x = self.m2i(point_on_pixmap.x())
+        y = self.m2i(point_on_pixmap.y())
+        tab_widget = self.tabs_cube_results.widget(self.tabs_cube_results.currentIndex())
+        hits = tab_widget.property('hits') if tab_widget is not None else None
+        if hits:
+            x = int(np.clip(x, 0, hits[0]['ncols'] - 1))
+            y = int(np.clip(y, 0, hits[0]['nrows'] - 1))
+        return (x, y)
+
+    def _prompt_make_source(self, point):
+        """Offer to load the currently viewed matched cube as the new source.
+
+        Selections and searches only operate on the active source cube, so a
+        click inside a matched-cube tab can't do anything until that cube
+        becomes the source. Rather than silently swapping (a heavy reload that
+        clears the current selections and search), ask first. On accept, the
+        clicked point is seeded as a selection once the cube loads and a fresh
+        search is kicked off (see _on_cube_loaded).
+        """
+        tab_widget = self.tabs_cube_results.widget(self.tabs_cube_results.currentIndex())
+        if tab_widget is None:
+            return
+        cube_file = tab_widget.property('cube_file')
+        if not cube_file:
+            return
+        cube_name = os.path.basename(cube_file)
+        reply = QMessageBox.question(
+            self, 'Make source',
+            f'You can only select and search within the active source cube.\n\n'
+            f'Do you want to make "{cube_name}" the new source?',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
+            self._pending_source_selection = point
+            self.load_data(cube_file)
 
     def _sync_legacy_state(self):
         """Sync scalar point_selection/rect_selection/spectrum_y from selections list."""
@@ -1311,6 +1434,8 @@ class MainWindow(QMainWindow):
         v_scrollbar.setValue(max(0, min(v_scrollbar.maximum(), round(new_cursor_viewport_y))))
 
     def handle_action_export_image(self):
+        if self.cube is None or self.rawfile is None:
+            return
         expdir = os.path.dirname(self.rawfile)
         basename = self.dataset_name()
         if self.tabs_img_ctrl.currentIndex() == 0:
@@ -1456,6 +1581,9 @@ class MainWindow(QMainWindow):
             self.action_search_in_cubes.blockSignals(False)
 
             self.config.search_in_same_cube = data['search_in_same_cube']
+            self.action_search_in_same_cube.blockSignals(True)
+            self.action_search_in_same_cube.setChecked(data['search_in_same_cube'])
+            self.action_search_in_same_cube.blockSignals(False)
 
             self.config.use_pca = data.get('use_pca', False)
 
@@ -1506,10 +1634,24 @@ class MainWindow(QMainWindow):
     def handle_toggle_search_in_db(self, checked):
         self.config.search_in_db = checked
         self.config.save()
+        # Toggling the reference DB only affects DB curves; redraw without
+        # re-running the cube search (it would pop the progress dialog and
+        # recompute identical results). No-ops when nothing is selected.
+        self.update_spectrum_plot(run_cube_search=False)
 
     def handle_toggle_search_in_cubes(self, checked):
         self.config.search_in_cubes = checked
         self.config.save()
+        # Checking it must run the cube search for the current selection;
+        # unchecking it just removes the cube hits (no search needed).
+        self.update_spectrum_plot(run_cube_search=checked)
+
+    def handle_toggle_search_in_same_cube(self, checked):
+        self.config.search_in_same_cube = checked
+        self.config.save()
+        # This changes which cubes are eligible, so the cube results genuinely
+        # change — re-run the search.
+        self.update_spectrum_plot(run_cube_search=True)
 
     def handle_action_analyze_cubes(self):
         if not self.config.cube_folder_path:
@@ -1588,6 +1730,18 @@ class MainWindow(QMainWindow):
     ##############################
     # Cross-cube search (async)
     ##############################
+    def _cancel_cube_search(self):
+        """Stop any running cube-search worker and close its progress dialog, so
+        a superseded search can't re-plot stale hits when it finishes."""
+        if self._search_worker is not None:
+            self._search_worker.terminate()
+            self._search_worker.wait()
+            self._search_worker = None
+        dlg = getattr(self, '_search_progress', None)
+        if dlg is not None:
+            dlg.close()
+            self._search_progress = None
+
     def _start_cube_search(self):
         """Launch background cross-cube search with a progress dialog."""
         # Cancel any running search
@@ -1628,6 +1782,13 @@ class MainWindow(QMainWindow):
         self._search_worker.finished.connect(self._on_search_finished)
         self._search_worker.error.connect(self._on_search_error)
         self._search_progress.canceled.connect(self._on_search_canceled)
+
+        # Paint the dialog now, before the worker's parallel search threads
+        # saturate the GIL. Otherwise the GUI thread can't repaint and the
+        # dialog only pops up once the search is nearly finished.
+        self._search_progress.show()
+        QGuiApplication.processEvents()
+
         self._search_worker.start()
 
     def _on_search_progress(self, current, total, cube_name, avg_time):
