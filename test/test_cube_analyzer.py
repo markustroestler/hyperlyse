@@ -430,12 +430,22 @@ class TestSearchInCachedCubes:
             include_subfolders=True, exclude_cube_file=raw_file)
         assert results == []
 
-    def test_returns_up_to_num_hits(self):
+    def test_returns_up_to_num_hits(self, tmp_path):
+        # Create 4 additional cubes so there are 5 total.
+        for i in range(4):
+            data = np.random.rand(4, 4, 20).astype(np.float64)
+            cf = str(tmp_path / f'extra_{i}.raw')
+            _create_mock_cube_with_data(cf, data, self.bands)
+            analyze_cube(cf, str(self.tmp_path), sample_rate=1, cube_class=MockCube)
+
         query = np.random.rand(20)
+        # Ask for 3 cubes from 5 available — should get exactly 3 (one hit each).
         results = search_in_cached_cubes(
             str(self.tmp_path), self.bands, query,
             sample_rate=1, num_hits=3)
         assert len(results) == 3
+        # Each result comes from a different cube.
+        assert len({r['cube_file'] for r in results}) == 3
 
     def test_results_sorted_by_error(self):
         query = np.random.rand(20)
@@ -594,11 +604,14 @@ class TestSearchMultipleCubes:
 
         analyze_cubes(str(tmp_path), sample_rate=1, cube_class=MockCube)
 
+        # num_hits=5 cubes requested, but only 2 cubes exist → 2 results (1 per cube)
         results = search_in_cached_cubes(
             str(tmp_path), bands, target,
             sample_rate=1, num_hits=5)
 
-        assert len(results) == 5
+        assert len(results) == 2
+        # Each result is from a different cube
+        assert len({r['cube_file'] for r in results}) == 2
         # Best hit should be the exact match in cube_a
         assert results[0]['cube_file'] == cube_a
         assert results[0]['x'] == 0
@@ -750,10 +763,11 @@ class TestPCASearch:
         assert best['y'] == 1
 
     def test_pca_search_returns_requested_hits(self):
+        # num_hits=3 cubes requested; only 1 cube in the fixture → 1 result
         results = search_in_cached_cubes(
             str(self.tmp_path), self.bands, self.target_spectrum,
             sample_rate=1, num_hits=3, use_pca=True)
-        assert len(results) == 3
+        assert len(results) == 1
 
     def test_pca_search_has_required_fields(self):
         results = search_in_cached_cubes(

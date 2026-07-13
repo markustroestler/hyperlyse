@@ -97,7 +97,8 @@ class CubeSearchWorker(QThread):
 
     def __init__(self, cube_folder, x_query, y_query, sample_rate,
                  include_subfolders, custom_range, use_gradient,
-                 squared_errs, num_hits, use_pca=False, exclude_cube_file=None):
+                 squared_errs, num_hits, use_pca=False, exclude_cube_file=None,
+                 include_cube_files=None):
         super().__init__()
         self.cube_folder = cube_folder
         self.x_query = x_query
@@ -110,6 +111,7 @@ class CubeSearchWorker(QThread):
         self.num_hits = num_hits
         self.use_pca = use_pca
         self.exclude_cube_file = exclude_cube_file
+        self.include_cube_files = include_cube_files
 
     def run(self):
         try:
@@ -128,6 +130,7 @@ class CubeSearchWorker(QThread):
                 num_hits=self.num_hits,
                 use_pca=self.use_pca,
                 exclude_cube_file=self.exclude_cube_file,
+                include_cube_files=self.include_cube_files,
                 progress_callback=on_progress)
             self.finished.emit(results)
         except Exception as e:
@@ -297,6 +300,8 @@ class MainWindow(QMainWindow):
         self.hit_colors_hex = ['#%02x%02x%02x' % tuple(c) for c in self.hit_colors_rgb]
         self.cube_search_results = []  # list of hit dicts from cube_analyzer.search_in_cached_cubes
         self._search_worker = None  # CubeSearchWorker instance when search is running
+        self._cube_tab_groups = []  # list of (cube_file, hits) ordered by best error
+        self._cube_current_index = 0  # 0 = Source, 1..n = cube hit
 
         # Per-hit-cube render caches (keyed by cache_dir) so the mode views
         # (layers/similarity/PCA) work on matched cubes just like the source.
@@ -340,13 +345,23 @@ class MainWindow(QMainWindow):
         self.shortcut_undo = QShortcut(QKeySequence('Ctrl+Z'), self)
         self.shortcut_undo.activated.connect(self.handle_undo_selection)
 
-        # Cube results tabs (above the image)
-        self.tabs_cube_results = QTabWidget(cw)
-        self.tabs_cube_results.currentChanged.connect(self.handle_cube_result_tab_changed)
-        self.tabs_cube_results.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum))
-        self.tabs_cube_results.setMaximumHeight(30)
-        self.tabs_cube_results.hide()  # hidden until there are cube hits
-        layout_img.addWidget(self.tabs_cube_results)
+        # Cube nav bar: scrollable horizontal button row above the image
+        self._cube_nav_scroll = QScrollArea(cw)
+        self._cube_nav_scroll.setWidgetResizable(True)
+        self._cube_nav_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._cube_nav_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._cube_nav_scroll.setMaximumHeight(48)
+        self._cube_nav_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._cube_nav_scroll.hide()
+
+        self._cube_nav_inner = QWidget()
+        self._cube_nav_layout = QHBoxLayout(self._cube_nav_inner)
+        self._cube_nav_layout.setContentsMargins(2, 2, 2, 2)
+        self._cube_nav_layout.setSpacing(3)
+        self._cube_nav_layout.addStretch()
+        self._cube_nav_scroll.setWidget(self._cube_nav_inner)
+
+        layout_img.addWidget(self._cube_nav_scroll)
 
         self.lbl_img = QLabel(cw)
         self.lbl_img.setMouseTracking(True)
@@ -733,14 +748,6 @@ class MainWindow(QMainWindow):
         self.action_search_in_cubes.setCheckable(True)
         self.action_search_in_cubes.setChecked(self.config.search_in_cubes)
         self.action_search_in_cubes.toggled.connect(self.handle_toggle_search_in_cubes)
-
-        self.action_search_in_same_cube = menu_settings.addAction('Include the current open cube in search')
-        self.action_search_in_same_cube.setCheckable(True)
-        self.action_search_in_same_cube.setChecked(self.config.search_in_same_cube)
-        self.action_search_in_same_cube.setToolTip(
-            'When disabled, the cube currently open is skipped during the\n'
-            'analyzed-cube search, so hits only come from other cubes.')
-        self.action_search_in_same_cube.toggled.connect(self.handle_toggle_search_in_same_cube)
 
         menu_settings.addSeparator()
 
@@ -1130,9 +1137,9 @@ class MainWindow(QMainWindow):
     #############################
     def _is_viewing_hit_tab(self):
         """Return True if user is viewing a cube hit tab (not Source)."""
-        return (self.tabs_cube_results.isVisible() and
-                self.tabs_cube_results.currentIndex() > 0 and
-                self.cube_search_results)
+        return (self._cube_nav_scroll.isVisible() and
+                self._cube_current_index > 0 and
+                bool(self._cube_tab_groups))
 
     def handle_click_on_image(self, event):
         if self._is_viewing_hit_tab():
@@ -1256,8 +1263,8 @@ class MainWindow(QMainWindow):
         point_on_pixmap = self.label_to_pixmap_point(pos)
         x = self.m2i(point_on_pixmap.x())
         y = self.m2i(point_on_pixmap.y())
-        tab_widget = self.tabs_cube_results.widget(self.tabs_cube_results.currentIndex())
-        hits = tab_widget.property('hits') if tab_widget is not None else None
+        idx = self._cube_current_index
+        hits = self._cube_tab_groups[idx - 1][1] if 0 < idx <= len(self._cube_tab_groups) else None
         if hits:
             x = int(np.clip(x, 0, hits[0]['ncols'] - 1))
             y = int(np.clip(y, 0, hits[0]['nrows'] - 1))
@@ -1273,10 +1280,10 @@ class MainWindow(QMainWindow):
         clicked point is seeded as a selection once the cube loads and a fresh
         search is kicked off (see _on_cube_loaded).
         """
-        tab_widget = self.tabs_cube_results.widget(self.tabs_cube_results.currentIndex())
-        if tab_widget is None:
+        idx = self._cube_current_index
+        if idx <= 0 or idx > len(self._cube_tab_groups):
             return
-        cube_file = tab_widget.property('cube_file')
+        cube_file = self._cube_tab_groups[idx - 1][0]
         if not cube_file:
             return
         cube_name = os.path.basename(cube_file)
@@ -1535,7 +1542,7 @@ class MainWindow(QMainWindow):
 
 
     def handle_action_open_preferences(self):
-        dialog = hyper.SettingsDialog(self, self.config)
+        dialog = hyper.SettingsDialog(self, self.config, exclude_cube_file=getattr(self, 'rawfile', None))
         if dialog.exec() == QDialog.DialogCode.Accepted:
             data = dialog.get_data()
 
@@ -1580,14 +1587,24 @@ class MainWindow(QMainWindow):
             self.action_search_in_cubes.setChecked(data['search_in_cubes'])
             self.action_search_in_cubes.blockSignals(False)
 
-            self.config.search_in_same_cube = data['search_in_same_cube']
-            self.action_search_in_same_cube.blockSignals(True)
-            self.action_search_in_same_cube.setChecked(data['search_in_same_cube'])
-            self.action_search_in_same_cube.blockSignals(False)
-
             self.config.use_pca = data.get('use_pca', False)
 
+            old_search_cube_include = self.config.search_cube_include
+            self.config.search_cube_include = data.get('search_cube_include', None)
+
             self.config.save()
+
+            # Re-run the cube search if the cube filter changed and a search is
+            # already active (selection exists and we are in Search tab).
+            cube_filter_changed = (
+                set(old_search_cube_include or []) != set(self.config.search_cube_include or [])
+                if (old_search_cube_include is None) == (self.config.search_cube_include is None)
+                else True
+            )
+            if (cube_filter_changed and self.config.search_in_cubes
+                    and self.spectrum_y is not None
+                    and self.tabs_spectra_source.currentIndex() == 1):
+                self.update_spectrum_plot(run_cube_search=True)
 
             # The sample rate only affects cubes when they are (re-)analyzed;
             # existing caches keep the rate they were built at. Make that
@@ -1640,18 +1657,38 @@ class MainWindow(QMainWindow):
         self.update_spectrum_plot(run_cube_search=False)
 
     def handle_toggle_search_in_cubes(self, checked):
+        if checked and not self._has_analyzed_cubes():
+            self._show_no_cubes_dialog()
+            return
         self.config.search_in_cubes = checked
         self.config.save()
         # Checking it must run the cube search for the current selection;
         # unchecking it just removes the cube hits (no search needed).
         self.update_spectrum_plot(run_cube_search=checked)
 
-    def handle_toggle_search_in_same_cube(self, checked):
-        self.config.search_in_same_cube = checked
-        self.config.save()
-        # This changes which cubes are eligible, so the cube results genuinely
-        # change — re-run the search.
-        self.update_spectrum_plot(run_cube_search=True)
+    def _has_analyzed_cubes(self):
+        if not self.config.cube_folder_path:
+            return False
+        cached = cube_analyzer.get_cached_cube_dirs(
+            self.config.cube_folder_path,
+            self.config.include_subfolders,
+            self.config.sample_rate)
+        return len(cached) > 0
+
+    def _show_no_cubes_dialog(self):
+        dlg = hyper.NoCubesAnalyzedDialog(self, self.config.cube_folder_path)
+        if dlg.exec() == QDialog.DialogCode.Accepted and dlg.wants_analysis():
+            new_path = dlg.get_cube_folder_path()
+            if new_path != self.config.cube_folder_path:
+                self.config.cube_folder_path = new_path
+                self.action_analyze_cubes.setEnabled(bool(new_path))
+                self.config.save()
+            self.handle_action_analyze_cubes()
+        else:
+            # Revert the checkbox without triggering the signal again
+            self.action_search_in_cubes.blockSignals(True)
+            self.action_search_in_cubes.setChecked(False)
+            self.action_search_in_cubes.blockSignals(False)
 
     def handle_action_analyze_cubes(self):
         if not self.config.cube_folder_path:
@@ -1744,6 +1781,10 @@ class MainWindow(QMainWindow):
 
     def _start_cube_search(self):
         """Launch background cross-cube search with a progress dialog."""
+        if not self._has_analyzed_cubes():
+            self._show_no_cubes_dialog()
+            return
+
         # Cancel any running search
         if self._search_worker is not None:
             self._search_worker.terminate()
@@ -1765,6 +1806,12 @@ class MainWindow(QMainWindow):
         self._search_progress.setAutoReset(False)
         self._search_progress.setWindowModality(Qt.WindowModality.WindowModal)
 
+        include = self.config.search_cube_include
+        include_set = (
+            {os.path.normcase(os.path.abspath(p)) for p in include}
+            if include is not None else None
+        )
+
         self._search_worker = CubeSearchWorker(
             self.config.cube_folder_path,
             self.cube.bands,
@@ -1776,8 +1823,8 @@ class MainWindow(QMainWindow):
             squared_errs=self.cb_squared.isChecked(),
             num_hits=self.config.num_hits,
             use_pca=self.config.use_pca,
-            exclude_cube_file=None if self.config.search_in_same_cube
-                               else getattr(self, 'rawfile', None))
+            exclude_cube_file=getattr(self, 'rawfile', None),
+            include_cube_files=include_set)
         self._search_worker.progress.connect(self._on_search_progress)
         self._search_worker.finished.connect(self._on_search_finished)
         self._search_worker.error.connect(self._on_search_error)
@@ -1830,7 +1877,7 @@ class MainWindow(QMainWindow):
         self._update_cube_result_tabs()
         self._search_worker = None
         n = len(self.cube_search_results)
-        self.statusBar().showMessage(f'Cube search complete. {n} hit{"s" if n != 1 else ""} found.')
+        self.statusBar().showMessage(f'Cube search complete. {n} cube{"s" if n != 1 else ""} found.')
 
     def _on_search_error(self, message):
         dlg = getattr(self, '_search_progress', None)
@@ -1885,18 +1932,15 @@ class MainWindow(QMainWindow):
     # helpers
     ##########
 
-    # --- Cube result tabs ---
+    # --- Cube result navigation ---
     def _update_cube_result_tabs(self):
-        """Rebuild cube result tabs from self.cube_search_results."""
-        self.tabs_cube_results.blockSignals(True)
-        self.tabs_cube_results.clear()
-
+        """Rebuild cube nav bar from self.cube_search_results."""
         if not self.cube_search_results:
-            self.tabs_cube_results.hide()
-            self.tabs_cube_results.blockSignals(False)
+            self._cube_tab_groups = []
+            self._cube_current_index = 0
+            self._rebuild_cube_nav()
             return
 
-        # Group hits by cube_file
         cube_groups = {}
         for hit in self.cube_search_results:
             key = hit['cube_file']
@@ -1904,29 +1948,51 @@ class MainWindow(QMainWindow):
                 cube_groups[key] = []
             cube_groups[key].append(hit)
 
-        # Order groups by their best (lowest error) hit
-        ordered_groups = sorted(cube_groups.items(), key=lambda kv: kv[1][0]['error'])
+        self._cube_tab_groups = sorted(cube_groups.items(),
+                                       key=lambda kv: kv[1][0]['error'])
+        self._cube_current_index = 0
+        self._rebuild_cube_nav()
 
-        # Add "Source" tab first
-        self.tabs_cube_results.addTab(QWidget(), 'Source')
+    def _rebuild_cube_nav(self):
+        """Rebuild the scrollable button row above the image."""
+        while self._cube_nav_layout.count():
+            item = self._cube_nav_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
 
-        # Add one tab per cube with hits
-        for cube_file, hits in ordered_groups:
+        if not self._cube_tab_groups:
+            self._cube_nav_scroll.hide()
+            return
+
+        self._add_nav_button('Source', 0)
+        for i, (cube_file, hits) in enumerate(self._cube_tab_groups):
             cube_name = hits[0]['cube_name']
-            # Truncate long names
-            display_name = cube_name if len(cube_name) <= 20 else cube_name[:17] + '...'
-            tab = QWidget()
-            tab.setProperty('cube_file', cube_file)
-            tab.setProperty('hits', hits)
-            self.tabs_cube_results.addTab(tab, display_name)
+            display_name = cube_name if len(cube_name) <= 15 else cube_name[:12] + '...'
+            self._add_nav_button(display_name, i + 1, tooltip=cube_name)
+        self._cube_nav_layout.addStretch()
 
-        self.tabs_cube_results.setCurrentIndex(0)
-        self.tabs_cube_results.show()
-        self.tabs_cube_results.blockSignals(False)
+        self._update_nav_selection()
+        self._cube_nav_scroll.show()
 
-    def handle_cube_result_tab_changed(self, index):
-        """When user clicks a cube result tab, update the image display."""
+    def _add_nav_button(self, label, index, tooltip=None):
+        btn = QPushButton(label)
+        btn.setCheckable(True)
+        if tooltip:
+            btn.setToolTip(tooltip)
+        btn.clicked.connect(lambda _checked, i=index: self._on_cube_nav_select(i))
+        self._cube_nav_layout.addWidget(btn)
+
+    def _on_cube_nav_select(self, index):
+        self._cube_current_index = index
+        self._update_nav_selection()
         self.update_image_label()
+
+    def _update_nav_selection(self):
+        for i in range(self._cube_nav_layout.count()):
+            item = self._cube_nav_layout.itemAt(i)
+            btn = item.widget() if item else None
+            if isinstance(btn, QPushButton):
+                btn.setChecked(i == self._cube_current_index)
 
     def _current_similarity_reference(self):
         """Reference (x, y) for the similarity mode given the current UI state.
@@ -2061,13 +2127,11 @@ class MainWindow(QMainWindow):
                                      nrows, ncols, sample_rate)
 
     def _display_cube_hit_image(self):
-        """Render the cube hit image for the currently selected hit tab."""
-        tab_index = self.tabs_cube_results.currentIndex()
-        if tab_index <= 0:
+        """Render the cube hit image for the currently selected cube nav button."""
+        idx = self._cube_current_index
+        if idx <= 0 or idx > len(self._cube_tab_groups):
             return
-
-        tab_widget = self.tabs_cube_results.widget(tab_index)
-        hits = tab_widget.property('hits')
+        hits = self._cube_tab_groups[idx - 1][1]
         if not hits:
             return
 

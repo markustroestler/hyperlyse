@@ -121,7 +121,8 @@ class TestBenchmarkSearch:
         # Default search results are always present
         assert "search_total" in results
         assert results["search_total"] >= 0
-        assert results["num_hits"] == 3
+        # num_hits=3 means up to 3 cubes; there is only 1 cube, so 1 result
+        assert results["num_hits"] == 1
         assert "best_error" in results
         assert "best_pos" in results
 
@@ -145,7 +146,8 @@ class TestBenchmarkSearch:
 
         assert "search_pca_total" in results
         assert results["search_pca_total"] >= 0
-        assert results["pca_num_hits"] == 3
+        # num_hits=3 means up to 3 cubes; there is only 1 cube, so 1 result
+        assert results["pca_num_hits"] == 1
         assert "top1_agree" in results
 
     @pytest.mark.skipif(not _HAS_PCA,

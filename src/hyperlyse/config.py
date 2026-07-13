@@ -26,9 +26,9 @@ class Config:
         self.sample_rate = cfg.get('SAMPLE_RATE', 1)
         self.search_in_db = cfg.get('SEARCH_IN_DB', True)
         self.search_in_cubes = cfg.get('SEARCH_IN_CUBES', False)
-        self.search_in_same_cube = cfg.get('SEARCH_IN_SAME_CUBE', True)
         self.num_hits = cfg.get('NUM_HITS', 3)
         self.use_pca = cfg.get('USE_PCA', False)
+        self.search_cube_include = cfg.get('SEARCH_CUBE_INCLUDE', None)
 
     def save(self):
         """Persist current settings back to config.json."""
@@ -40,9 +40,12 @@ class Config:
         cfg['SAMPLE_RATE'] = self.sample_rate
         cfg['SEARCH_IN_DB'] = self.search_in_db
         cfg['SEARCH_IN_CUBES'] = self.search_in_cubes
-        cfg['SEARCH_IN_SAME_CUBE'] = self.search_in_same_cube
         cfg['NUM_HITS'] = self.num_hits
         cfg['USE_PCA'] = self.use_pca
+        if self.search_cube_include is None:
+            cfg.pop('SEARCH_CUBE_INCLUDE', None)
+        else:
+            cfg['SEARCH_CUBE_INCLUDE'] = self.search_cube_include
         with open(self._config_path, 'w') as f:
             json.dump(cfg, f, indent=2)
 

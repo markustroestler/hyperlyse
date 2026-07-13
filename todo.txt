@@ -1,2 +1,9 @@
-buttons next to slider (slider shorter) smaller + icons
-windows same height
+bester hit in jedem cube
+tabs mit blätter funcktion
+tabs bei hover ganzer file name
+
+
+
+test mit exportiertem jdx
+cube search checkbox mit analysierten cubes
+Suche in db mit exportiertem spectrum

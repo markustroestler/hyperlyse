@@ -1,6 +1,6 @@
 from hyperlyse.config import Config
 from hyperlyse.cube import Cube, CubeLazy
-from hyperlyse.customwidgets import PlotCanvas, SaveSpectrumDialog, SettingsDialog
+from hyperlyse.customwidgets import PlotCanvas, SaveSpectrumDialog, SettingsDialog, NoCubesAnalyzedDialog, CubeSelectionDialog
 from hyperlyse.qrangeslider import QRangeSlider
 from hyperlyse.database import Database, Metadata, Spectrum, spectrum_to_vector
 from hyperlyse.feature_extractor import FeatureExtractor

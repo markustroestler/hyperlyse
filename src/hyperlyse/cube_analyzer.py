@@ -590,6 +590,7 @@ def search_in_cached_cubes(cube_folder, x_query, y_query,
                            custom_range=None, use_gradient=False,
                            squared_errs=True, num_hits=3,
                            use_pca=False, exclude_cube_file=None,
+                           include_cube_files=None,
                            progress_callback=None, max_workers=None):
     """
     Search across all cached cubes for spectra similar to the query.
@@ -607,17 +608,20 @@ def search_in_cached_cubes(cube_folder, x_query, y_query,
         then re-ranks candidates within this range).
     :param use_gradient: Compare gradients instead of raw spectra.
     :param squared_errs: Use squared errors.
-    :param num_hits: Number of top hits to return.
+    :param num_hits: Number of top cubes to return (one best hit per cube).
     :param use_pca: Use the prebuilt PCA+BallTree index to prefilter candidates
         (falls back to brute-force if PCA artifacts are missing). Results are
         re-ranked with the exact metric, so errors are comparable to brute-force.
     :param exclude_cube_file: Optional cube file path to exclude from the search
         (e.g. the cube currently open in the UI). Matched by scene, so the raw
         capture and its reflectance product are treated as the same cube.
+    :param include_cube_files: Optional set of normcase-normalized absolute paths.
+        When provided, only cubes whose path is in this set are searched. None
+        means all analyzed cubes are searched.
     :param progress_callback: Optional callable(current, total, cube_name, avg_time).
     :param max_workers: Thread pool size. Defaults to DEFAULT_SEARCH_WORKERS,
         capped at the number of cubes. Pass 1 to force sequential search.
-    :return: List of hit dicts sorted by error, up to num_hits entries.
+    :return: List of hit dicts sorted by error, one per cube, up to num_hits cubes.
     """
     x_query = np.array(x_query)
     y_query = np.array(y_query)
@@ -648,6 +652,10 @@ def search_in_cached_cubes(cube_folder, x_query, y_query,
             # so opening the raw capture still excludes its reflectance product.
             excluded = (exclude_key is not None
                         and _scene_key_normalized(cube_filepath) == exclude_key)
+            if not excluded and include_cube_files is not None:
+                norm = os.path.normcase(os.path.abspath(cube_filepath))
+                if norm not in include_cube_files:
+                    excluded = True
             cache_dir = _cache_dir_for_cube(cube_folder, cube_filepath)
 
             # Search uses whatever cache exists, regardless of the current UI
@@ -658,7 +666,7 @@ def search_in_cached_cubes(cube_folder, x_query, y_query,
                     meta = json.load(f)
                 hits = _search_one_cube(cube_filepath, cache_dir, meta,
                                         x_query, y_query, custom_range,
-                                        use_gradient, squared_errs, num_hits, use_pca)
+                                        use_gradient, squared_errs, 1, use_pca)
         finally:
             if hits:
                 with hits_lock:
@@ -680,7 +688,7 @@ def search_in_cached_cubes(cube_folder, x_query, y_query,
             for f in futures:
                 f.result()
 
-    # Sort all hits by error and return top N
+    # Sort by error — one hit per cube — and return the best num_hits cubes.
     all_hits.sort(key=lambda h: h['error'])
     return all_hits[:num_hits]
 
@@ -693,6 +701,26 @@ def get_cached_cube_dirs(cube_folder, include_subfolders=False, sample_rate=1):
         cache_dir = _cache_dir_for_cube(cube_folder, cube_filepath)
         if _is_cache_valid(cache_dir, cube_filepath, sample_rate):
             result.append(cache_dir)
+    return result
+
+
+def list_analyzed_cubes(cube_folder, include_subfolders=False):
+    """Return list of (display_name, cube_filepath) for cubes with a complete cache."""
+    cube_files = discover_cubes(cube_folder, include_subfolders)
+    result = []
+    for cube_filepath in cube_files:
+        cache_dir = _cache_dir_for_cube(cube_folder, cube_filepath)
+        meta_path = os.path.join(cache_dir, 'metadata.json')
+        if not os.path.isfile(meta_path):
+            continue
+        try:
+            with open(meta_path) as f:
+                meta = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            continue
+        if meta.get('status') == 'complete':
+            name = os.path.splitext(os.path.basename(cube_filepath))[0]
+            result.append((name, cube_filepath))
     return result
 
 

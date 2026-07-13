@@ -1,8 +1,9 @@
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+import os
 from PyQt6.QtWidgets import (QSizePolicy, QDialog, QFormLayout, QLabel, QLineEdit, QComboBox,
                               QPushButton, QVBoxLayout, QHBoxLayout, QHBoxLayout, QPushButton, QCheckBox, QSpinBox,
-                              QFileDialog, QDialogButtonBox)
+                              QFileDialog, QDialogButtonBox, QScrollArea, QWidget, QMessageBox)
 from PyQt6.QtCore import QSize, Qt
 
 class PlotCanvas(FigureCanvas):
@@ -146,14 +147,100 @@ class SaveSpectrumDialog(QDialog):
         }
 
 
+class CubeSelectionDialog(QDialog):
+    """Dialog for selecting which analyzed cubes are included in search."""
+
+    def __init__(self, parent, analyzed_cubes, current_include):
+        """
+        :param analyzed_cubes: list of (display_name, filepath) from list_analyzed_cubes()
+        :param current_include: None (all included) or list of filepath strings
+        """
+        super().__init__(parent)
+        self.setWindowTitle('Select cubes for search')
+        self._result = current_include
+        self._checkboxes = []
+
+        if current_include is not None:
+            norm_include = {os.path.normcase(os.path.abspath(p)) for p in current_include}
+        else:
+            norm_include = None
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(6)
+
+        # Check all / Uncheck all row
+        btn_row = QHBoxLayout()
+        btn_check_all = QPushButton('Check all')
+        btn_uncheck_all = QPushButton('Uncheck all')
+        btn_check_all.clicked.connect(self._check_all)
+        btn_uncheck_all.clicked.connect(self._uncheck_all)
+        btn_row.addWidget(btn_check_all)
+        btn_row.addWidget(btn_uncheck_all)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+
+        # Scrollable list of checkboxes
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setSpacing(2)
+        content_layout.setContentsMargins(4, 4, 4, 4)
+
+        for name, filepath in analyzed_cubes:
+            cb = QCheckBox(name)
+            cb.setToolTip(filepath)
+            if norm_include is None:
+                cb.setChecked(True)
+            else:
+                cb.setChecked(os.path.normcase(os.path.abspath(filepath)) in norm_include)
+            content_layout.addWidget(cb)
+            self._checkboxes.append((cb, filepath))
+
+        content_layout.addStretch()
+        scroll.setWidget(content)
+        layout.addWidget(scroll)
+
+        # OK / Cancel
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(self._on_accept)
+        bb.rejected.connect(self.reject)
+        layout.addWidget(bb)
+
+        n = len(analyzed_cubes)
+        self.resize(QSize(420, min(100 + n * 26 + 60, 520)))
+
+    def _check_all(self):
+        for cb, _ in self._checkboxes:
+            cb.setChecked(True)
+
+    def _uncheck_all(self):
+        for cb, _ in self._checkboxes:
+            cb.setChecked(False)
+
+    def _on_accept(self):
+        if all(cb.isChecked() for cb, _ in self._checkboxes):
+            self._result = None
+        else:
+            self._result = [fp for cb, fp in self._checkboxes if cb.isChecked()]
+        self.accept()
+
+    def get_include(self):
+        """None if all cubes included, else list of selected cube filepaths."""
+        return self._result
+
+
 class SettingsDialog(QDialog):
-    def __init__(self, parent, config):
+    def __init__(self, parent, config, exclude_cube_file=None):
         super(QDialog, self).__init__(parent)
+        self._config = config
+        self._search_cube_include = config.search_cube_include
+        self._exclude_cube_file = exclude_cube_file
 
         self.setWindowTitle('Preferences')
 
         layout = QFormLayout(self)
-        self.resize(QSize(500, 250))
+        self.resize(QSize(500, 280))
 
         # Database path
         db_row = QHBoxLayout()
@@ -203,13 +290,6 @@ class SettingsDialog(QDialog):
         self.chk_search_cubes.setChecked(config.search_in_cubes)
         layout.addRow('', self.chk_search_cubes)
 
-        self.chk_search_same_cube = QCheckBox('Include the current open cube in search')
-        self.chk_search_same_cube.setChecked(config.search_in_same_cube)
-        self.chk_search_same_cube.setToolTip(
-            'When disabled, the cube currently open is skipped during the\n'
-            'analyzed-cube search, so hits only come from other cubes.')
-        layout.addRow('', self.chk_search_same_cube)
-
         self.chk_use_pca = QCheckBox('Use fast search (PCA prefilter)')
         self.chk_use_pca.setChecked(config.use_pca)
         self.chk_use_pca.setToolTip(
@@ -218,6 +298,10 @@ class SettingsDialog(QDialog):
             'Dramatically faster than the brute-force scan (tens of ms vs ~1s per\n'
             'cube) and returns the same top hits.')
         layout.addRow('', self.chk_use_pca)
+
+        self.btn_cube_filter = QPushButton('Manage analyzed cube filter...')
+        self.btn_cube_filter.clicked.connect(self._open_cube_filter)
+        layout.addRow('', self.btn_cube_filter)
 
         # Button box
         self.bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
@@ -239,6 +323,26 @@ class SettingsDialog(QDialog):
         if path:
             self.le_cube_path.setText(path)
 
+    def _open_cube_filter(self):
+        folder = self.le_cube_path.text()
+        if not folder:
+            QMessageBox.information(self, 'No cube folder', 'Set a cube folder first.')
+            return
+        from hyperlyse import cube_analyzer
+        analyzed = cube_analyzer.list_analyzed_cubes(folder, self._config.include_subfolders)
+        if self._exclude_cube_file:
+            excl_key = cube_analyzer._scene_key_normalized(self._exclude_cube_file)
+            analyzed = [(name, fp) for name, fp in analyzed
+                        if cube_analyzer._scene_key_normalized(fp) != excl_key]
+        if not analyzed:
+            QMessageBox.information(self, 'No cubes analyzed',
+                                    'No analyzed cubes found in the cube folder.\n'
+                                    'Run "Analyze cubes" first.')
+            return
+        dlg = CubeSelectionDialog(self, analyzed, self._search_cube_include)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._search_cube_include = dlg.get_include()
+
     def get_data(self):
         return {
             'default_db_path': self.le_db_path.text(),
@@ -247,6 +351,65 @@ class SettingsDialog(QDialog):
             'num_hits': self.cb_num_hits.currentData(),
             'search_in_db': self.chk_search_db.isChecked(),
             'search_in_cubes': self.chk_search_cubes.isChecked(),
-            'search_in_same_cube': self.chk_search_same_cube.isChecked(),
             'use_pca': self.chk_use_pca.isChecked(),
+            'search_cube_include': self._search_cube_include,
         }
+
+
+class NoCubesAnalyzedDialog(QDialog):
+    """Dialog shown when cube search is enabled but no cubes have been analyzed yet."""
+
+    def __init__(self, parent, cube_folder_path=''):
+        super().__init__(parent)
+        self.setWindowTitle('No cubes analyzed')
+        self._start_analysis = False
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        msg = QLabel(
+            'No cubes have been analyzed yet.\n'
+            'Set the cube folder path below and start the analysis to enable cube search.')
+        msg.setWordWrap(True)
+        layout.addWidget(msg)
+
+        form = QFormLayout()
+        path_row = QHBoxLayout()
+        self.le_cube_path = QLineEdit(cube_folder_path)
+        self.btn_browse = QPushButton('...')
+        self.btn_browse.setFixedWidth(40)
+        self.btn_browse.clicked.connect(self._browse)
+        path_row.addWidget(self.le_cube_path)
+        path_row.addWidget(self.btn_browse)
+        form.addRow(QLabel('Cube folder'), path_row)
+        layout.addLayout(form)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        self.btn_analyze = QPushButton('Start Analysis')
+        self.btn_analyze.setDefault(True)
+        self.btn_cancel = QPushButton('Cancel')
+        self.btn_analyze.clicked.connect(self._on_start)
+        self.btn_cancel.clicked.connect(self.reject)
+        btn_row.addWidget(self.btn_analyze)
+        btn_row.addWidget(self.btn_cancel)
+        layout.addLayout(btn_row)
+
+        self.resize(QSize(500, 160))
+
+    def _browse(self):
+        start = self.le_cube_path.text() or '.'
+        path = QFileDialog.getExistingDirectory(
+            self, 'Select folder containing hyperspectral cubes', start)
+        if path:
+            self.le_cube_path.setText(path)
+
+    def _on_start(self):
+        self._start_analysis = True
+        self.accept()
+
+    def get_cube_folder_path(self):
+        return self.le_cube_path.text()
+
+    def wants_analysis(self):
+        return self._start_analysis
