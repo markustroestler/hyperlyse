@@ -17,3 +17,4 @@ contract.txt
 **/cubes/**
 **/.hyperlyse_cache/
 **/data/**
+**/_dist_config/**

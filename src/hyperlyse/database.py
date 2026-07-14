@@ -101,9 +101,11 @@ class Spectrum:
 
     @staticmethod
     def __jcamp_line_to_key_value(line):
-        result = re.search(r'##(.*)= (.*)', line)
+        # Accept both '##KEY= VALUE' (Hyperlyse's own output) and '##KEY=VALUE'
+        # (no space, as produced by OPUS and most other JCAMP-DX exporters).
+        result = re.match(r'##(.+?)=\s*(.*)', line)
         if result:
-            return (result.group(1), result.group(2))
+            return (result.group(1).strip(), result.group(2))
         else:
             return None
 
@@ -115,12 +117,26 @@ class Spectrum:
                 values.append('')
         return values
 
+    # Matches a single AFFN number; '+'/'-' double as value delimiters, so a
+    # data line like '376+172825235+171101671' yields ['376', '172825235', ...].
+    __jcamp_number_re = re.compile(r'[+-]?\d*\.?\d+(?:[eE][+-]?\d+)?')
+
+    @staticmethod
+    def __jcamp_to_float(s, default=None):
+        try:
+            return float(s)
+        except (TypeError, ValueError):
+            return default
+
     @staticmethod
     def load_jcamp(file):
         """
-        Only works with files produced by __save_jcamp
-        :param file:
-        :return:
+        Reads a JCAMP-DX spectrum.
+
+        Supports both Hyperlyse's own output (one 'X Y' pair per line) and the
+        standard '(X++(Y..Y))' XYDATA form written by other programs (e.g. OPUS),
+        where each line holds one X followed by many '+'/'-' delimited Y values
+        (AFFN). XFACTOR, YFACTOR and DELTAX are applied when present.
         """
         with open(file, 'r') as f:
             lines = f.read().splitlines()
@@ -129,16 +145,31 @@ class Spectrum:
         metadata = Metadata('')
         x = []
         y = []
+        xfactor = 1.0
+        yfactor = 1.0
+        deltax = None
+        firstx = None
+        lastx = None
+        npoints = None
+
         for line in lines:
             kv = Spectrum.__jcamp_line_to_key_value(line)
             if kv is None:
-                if start_xy_data:
-                    vx, vy = Spectrum.__jcamp_split_multi_values(line, 2, ' ')
-                    try:
-                        x.append(float(vx))
-                        y.append(float(vy))
-                    except:
-                        pass
+                if start_xy_data and not line.lstrip().startswith('$$'):
+                    tokens = Spectrum.__jcamp_number_re.findall(line)
+                    if len(tokens) < 2:
+                        continue
+                    x_data = Spectrum.__jcamp_to_float(tokens[0])
+                    if x_data is None:
+                        continue
+                    x_first = x_data * xfactor
+                    step = deltax if deltax is not None else 0.0
+                    for j, tok in enumerate(tokens[1:]):
+                        yv = Spectrum.__jcamp_to_float(tok)
+                        if yv is None:
+                            continue
+                        x.append(x_first + j * step)
+                        y.append(yv * yfactor)
             else:
                 k, v = kv
                 if k == 'TITLE':
@@ -155,10 +186,31 @@ class Spectrum:
                     description, intensity = Spectrum.__jcamp_split_multi_values(v, 2)
                     metadata.description = description
                     metadata.intensity = intensity
+                elif k == 'XFACTOR':
+                    xfactor = Spectrum.__jcamp_to_float(v, 1.0)
+                elif k == 'YFACTOR':
+                    yfactor = Spectrum.__jcamp_to_float(v, 1.0)
+                elif k == 'DELTAX':
+                    deltax = Spectrum.__jcamp_to_float(v)
+                elif k == 'FIRSTX':
+                    firstx = Spectrum.__jcamp_to_float(v)
+                elif k == 'LASTX':
+                    lastx = Spectrum.__jcamp_to_float(v)
+                elif k == 'NPOINTS':
+                    npoints = Spectrum.__jcamp_to_float(v)
                 elif k == 'XYDATA':
+                    # For '(X++(Y..Y))' the abscissa increments by DELTAX between
+                    # the Y values on a line; derive it if the header omitted it.
+                    if deltax is None and firstx is not None and lastx is not None \
+                            and npoints not in (None, 0, 1):
+                        deltax = (lastx - firstx) * xfactor / (npoints - 1)
                     start_xy_data = True
                 elif k == 'END':
                     break
+
+        if not metadata.id:
+            metadata.id = os.path.splitext(os.path.basename(file))[0]
+
         return Spectrum(np.array(x),
                         np.array(y),
                         metadata)
@@ -224,6 +276,9 @@ class Database:
         y2 = np.array(y2)
 
         is_cube = len(y1.shape) == 3
+
+        if x1.size == 0 or x2.size == 0:
+            return None
 
         # Compute effective overlapping wavelength range
         lambda_min = max(x1[0], x2[0])
@@ -297,6 +352,9 @@ class Database:
 
         is_cube = len(y1.shape) == 3
 
+        if x1.size == 0 or x2.size == 0:
+            return None
+
         lambda_min = max(x1[0], x2[0])
         lambda_max = min(x1[-1], x2[-1])
         if custom_range is not None:
@@ -353,6 +411,11 @@ class Database:
         for db_spectrum in self.spectra:
             x2 = np.array(db_spectrum.x)
             y2 = np.array(db_spectrum.y)
+
+            # Skip empty/malformed db spectra (e.g. a file that could not be
+            # parsed) instead of crashing on x2[0].
+            if x2.size == 0 or y2.size == 0:
+                continue
 
             # --- Overlap (same math as compare_spectra) ---
             lambda_min = max(x_query[0], x2[0])

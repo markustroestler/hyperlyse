@@ -1,5 +1,5 @@
 {
-  "DEFAULT_DB_PATH": "C:/Users/markus/Documents/repos/hyperlyse",
+  "DEFAULT_DB_PATH": "C:/Users/markus/Documents/repos/hyperlyse/data",
   "SCROLL_SPEED": 0.01,
   "CROSS_SIZE": 10,
   "MARKER_COLORS": [
@@ -22,8 +22,8 @@
   "MARKER_ALPHA": 0.5,
   "CUBE_FOLDER_PATH": "C:/Users/markus/Documents/repos/hyperlyse/data",
   "SAMPLE_RATE": 1,
-  "SEARCH_IN_DB": false,
-  "SEARCH_IN_CUBES": true,
+  "SEARCH_IN_DB": true,
+  "SEARCH_IN_CUBES": false,
   "NUM_HITS": 10,
   "USE_PCA": false
 }
